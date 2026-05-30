@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "circuit-tracing-ot"
+version = "0.1.0"
+description = "MCQA attribution graph experiments with Gemma-2-2B CLTs and circuit-tracer."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "circuit-tracer>=0.1.0",
+    "torch",
+    "transformers",
+    "accelerate",
+    "datasets",
+    "huggingface-hub",
+    "pyyaml",
+    "pandas",
+]
+
+[project.optional-dependencies]
+viz = [
+    "circuit-tracer[viz]>=0.1.0",
+    "ipykernel",
+    "ipywidgets",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
