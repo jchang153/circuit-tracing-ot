@@ -67,8 +67,8 @@ def trace_prompt(
     graph_path = graph_dir / f"{prompt.slug}.pt"
     start = perf_counter()
     graph = attribute(
-        model,
         prompt.prompt,
+        model,
         batch_size=int(config.batch_size),
         max_n_logits=int(config.max_n_logits),
         desired_logit_prob=float(config.desired_logit_prob),
