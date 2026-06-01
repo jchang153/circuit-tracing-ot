@@ -1,13 +1,4 @@
-prompts:
-  - prompt_id: copycolors-a
-    expected_answer: " A"
-    target_variable: answer_pointer
-  - prompt_id: copycolors-d
-    expected_answer: " D"
-    target_variable: answer_pointer
-  - prompt_id: copycolors-token-blue
-    expected_answer: " B"
-    target_variable: answer_token
-  - prompt_id: copycolors-token-yellow
-    expected_answer: " B"
-    target_variable: answer_token
+dataset_name: jchang153/copycolors_mcqa
+dataset_config: null
+dataset_split: train
+prompt_id_format: "{dataset_config_or_default}-{dataset_split}-{row_index}"

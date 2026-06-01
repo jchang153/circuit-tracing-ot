@@ -7,15 +7,23 @@ import argparse
 from pathlib import Path
 
 from circuit_tracing_ot.config import resolve_transcoder_set
-from circuit_tracing_ot.mcqa_prompts import PROMPTS, get_prompt
-from circuit_tracing_ot.model import load_replacement_model
-from circuit_tracing_ot.trace import TraceConfig, trace_prompt
+from circuit_tracing_ot.mcqa_prompts import (
+    DEFAULT_DATASET_CONFIG,
+    DEFAULT_DATASET_NAME,
+    DEFAULT_DATASET_SPLIT,
+    get_prompt,
+    load_prompts,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prompt-id", default="copycolors-a")
-    parser.add_argument("--all", action="store_true", help="Trace all representative prompts.")
+    parser.add_argument("--prompt-id", default=None, help="Dataset row id or formatted prompt id.")
+    parser.add_argument("--all", action="store_true", help="Trace all loaded prompts.")
+    parser.add_argument("--limit", type=int, default=None, help="Limit loaded dataset rows.")
+    parser.add_argument("--dataset-name", default=DEFAULT_DATASET_NAME)
+    parser.add_argument("--dataset-config", default=DEFAULT_DATASET_CONFIG)
+    parser.add_argument("--dataset-split", default=DEFAULT_DATASET_SPLIT)
     parser.add_argument("--model-name", default="google/gemma-2-2b")
     parser.add_argument("--transcoder-size", default="426k", choices=("426k", "2.5m"))
     parser.add_argument("--transcoder-set", default=None)
@@ -36,8 +44,23 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    from circuit_tracing_ot.model import load_replacement_model
+    from circuit_tracing_ot.trace import TraceConfig, trace_prompt
+
     transcoder_set = resolve_transcoder_set(args.transcoder_set, args.transcoder_size)
-    prompts = list(PROMPTS) if args.all else [get_prompt(args.prompt_id)]
+    loaded_prompts = load_prompts(
+        dataset_name=args.dataset_name,
+        dataset_config=args.dataset_config,
+        dataset_split=args.dataset_split,
+        limit=args.limit,
+    )
+    if args.all:
+        prompts = loaded_prompts
+    elif args.prompt_id:
+        prompts = [get_prompt(args.prompt_id, loaded_prompts)]
+    else:
+        prompts = [loaded_prompts[0]]
 
     model = load_replacement_model(
         model_name=args.model_name,

@@ -8,13 +8,22 @@ import json
 
 from circuit_tracing_ot.config import resolve_transcoder_set
 from circuit_tracing_ot.interventions import parse_feature_intervention, run_feature_intervention
-from circuit_tracing_ot.mcqa_prompts import get_prompt
-from circuit_tracing_ot.model import load_replacement_model
+from circuit_tracing_ot.mcqa_prompts import (
+    DEFAULT_DATASET_CONFIG,
+    DEFAULT_DATASET_NAME,
+    DEFAULT_DATASET_SPLIT,
+    get_prompt,
+    load_prompts,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prompt-id", default="copycolors-a")
+    parser.add_argument("--prompt-id", default=None, help="Dataset row id or formatted prompt id.")
+    parser.add_argument("--limit", type=int, default=None, help="Limit loaded dataset rows.")
+    parser.add_argument("--dataset-name", default=DEFAULT_DATASET_NAME)
+    parser.add_argument("--dataset-config", default=DEFAULT_DATASET_CONFIG)
+    parser.add_argument("--dataset-split", default=DEFAULT_DATASET_SPLIT)
     parser.add_argument("--model-name", default="google/gemma-2-2b")
     parser.add_argument("--transcoder-size", default="426k", choices=("426k", "2.5m"))
     parser.add_argument("--transcoder-set", default=None)
@@ -33,7 +42,16 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    prompt = get_prompt(args.prompt_id)
+
+    from circuit_tracing_ot.model import load_replacement_model
+
+    prompts = load_prompts(
+        dataset_name=args.dataset_name,
+        dataset_config=args.dataset_config,
+        dataset_split=args.dataset_split,
+        limit=args.limit,
+    )
+    prompt = get_prompt(args.prompt_id, prompts) if args.prompt_id else prompts[0]
     transcoder_set = resolve_transcoder_set(args.transcoder_set, args.transcoder_size)
     model = load_replacement_model(
         model_name=args.model_name,

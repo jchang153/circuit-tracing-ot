@@ -9,9 +9,8 @@ This repo intentionally starts with the three workflows implemented by
 2. Export and serve pruned graph files for the interactive HTML viewer.
 3. Run feature interventions on selected transcoder features.
 
-OT, counterfactual alignment, progressive localization, and DAS are planned follow-ups. The first
-goal is to get representative MCQA prompts into the existing CLT attribution-graph stack with as
-little new machinery as possible.
+The goal is to run the upstream `circuit-tracer` attribution graph and feature-intervention
+pipeline on CopyColors MCQA prompts with as little new machinery as possible.
 
 ## Setup
 
@@ -50,14 +49,49 @@ or use the shortcut:
 
 ## Trace Representative MCQA Prompts
 
-```bash
-python scripts/trace_representative_mcqa.py --prompt-id copycolors-a
+Prompts are loaded directly from the Hugging Face dataset:
+
+```text
+jchang153/copycolors_mcqa
 ```
 
-Trace all configured prompts:
+The default split is `train`. The live dataset rows already include a formatted `prompt` plus
+`choices`, so the tracing code passes that prompt directly to `circuit-tracer`:
+
+```text
+Question: {object} is {color}. What color is {object}?
+A. {choice text}
+B. {choice text}
+...
+Answer:
+```
+
+Trace the first training prompt:
+
+```bash
+python scripts/trace_representative_mcqa.py
+```
+
+Trace a specific dataset row by row id or formatted prompt id:
+
+```bash
+python scripts/trace_representative_mcqa.py --prompt-id 21
+python scripts/trace_representative_mcqa.py --prompt-id default-train-21
+```
+
+Trace all loaded prompts, optionally limiting the number of rows:
 
 ```bash
 python scripts/trace_representative_mcqa.py --all
+python scripts/trace_representative_mcqa.py --all --limit 4
+```
+
+If you point the script at an older multi-config CopyColors dataset, pass the config name:
+
+```bash
+python scripts/trace_representative_mcqa.py \
+  --dataset-config 10_answer_choices \
+  --dataset-split validation
 ```
 
 Outputs are written under:
@@ -91,7 +125,7 @@ After inspecting a graph, choose one or more feature IDs from the UI and run:
 
 ```bash
 python scripts/intervene_mcqa.py \
-  --prompt-id copycolors-a \
+  --prompt-id 21 \
   --feature 20:-1:341:0.0
 ```
 
