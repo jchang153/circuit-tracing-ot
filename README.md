@@ -20,6 +20,20 @@ source .venv/bin/activate
 pip install -e ".[viz]"
 ```
 
+On NCSA Delta, install a CUDA wheel compatible with the cluster driver before running traces:
+
+```bash
+pip uninstall -y torch torchvision torchaudio
+pip install --index-url https://download.pytorch.org/whl/cu126 torch torchvision torchaudio
+python - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print(torch.cuda.get_device_name(0))
+PY
+```
+
 Gemma-2-2B requires Hugging Face access. Set one of:
 
 ```bash
