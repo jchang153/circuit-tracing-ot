@@ -7,9 +7,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import perf_counter
 
-from circuit_tracer import attribute
-from circuit_tracer.utils import create_graph_files
-
 from .config import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_DESIRED_LOGIT_PROB,
@@ -23,6 +20,40 @@ from .config import (
 )
 from .logging import log_progress
 from .mcqa_prompts import MCQAPrompt
+
+
+def export_graph_files(
+    *,
+    graph_path: Path,
+    slug: str,
+    graph_file_dir: Path,
+    node_threshold: float,
+    edge_threshold: float,
+) -> None:
+    """Export graph files across circuit-tracer versions with different output_path semantics."""
+    from circuit_tracer.utils import create_graph_files
+
+    try:
+        create_graph_files(
+            graph_or_path=graph_path,
+            slug=slug,
+            output_path=graph_file_dir,
+            node_threshold=float(node_threshold),
+            edge_threshold=float(edge_threshold),
+        )
+    except AssertionError as exc:
+        if "Could not find" not in str(exc):
+            raise
+        log_progress(
+            "retrying graph export with JSON output path for this circuit-tracer version"
+        )
+        create_graph_files(
+            graph_or_path=graph_path,
+            slug=slug,
+            output_path=graph_file_dir / f"{slug}.json",
+            node_threshold=float(node_threshold),
+            edge_threshold=float(edge_threshold),
+        )
 
 
 @dataclass(frozen=True)
@@ -68,6 +99,8 @@ def trace_prompt(
     graph_path = graph_dir / f"{prompt.slug}.pt"
     start = perf_counter()
     log_progress(f"running attribution for {prompt.prompt_id}")
+    from circuit_tracer import attribute
+
     graph = attribute(
         prompt.prompt,
         model,
@@ -83,12 +116,12 @@ def trace_prompt(
         f"exporting/pruning graph files to {graph_file_dir} "
         f"(node_threshold={config.node_threshold}, edge_threshold={config.edge_threshold})"
     )
-    create_graph_files(
-        graph_or_path=graph_path,
+    export_graph_files(
+        graph_path=graph_path,
         slug=prompt.slug,
-        output_path=graph_file_dir,
-        node_threshold=float(config.node_threshold),
-        edge_threshold=float(config.edge_threshold),
+        graph_file_dir=graph_file_dir,
+        node_threshold=config.node_threshold,
+        edge_threshold=config.edge_threshold,
     )
     elapsed = perf_counter() - start
 
