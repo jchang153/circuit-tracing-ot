@@ -7,6 +7,7 @@ import argparse
 from pathlib import Path
 
 from circuit_tracing_ot.config import resolve_transcoder_set
+from circuit_tracing_ot.logging import log_progress
 from circuit_tracing_ot.mcqa_prompts import (
     DEFAULT_DATASET_CONFIG,
     DEFAULT_DATASET_NAME,
@@ -49,6 +50,10 @@ def main() -> None:
     from circuit_tracing_ot.trace import TraceConfig, trace_prompt
 
     transcoder_set = resolve_transcoder_set(args.transcoder_set, args.transcoder_size)
+    log_progress(
+        f"loading prompts from {args.dataset_name} "
+        f"config={args.dataset_config or 'default'} split={args.dataset_split}"
+    )
     loaded_prompts = load_prompts(
         dataset_name=args.dataset_name,
         dataset_config=args.dataset_config,
@@ -61,7 +66,15 @@ def main() -> None:
         prompts = [get_prompt(args.prompt_id, loaded_prompts)]
     else:
         prompts = [loaded_prompts[0]]
+    log_progress(
+        f"selected {len(prompts)} prompt(s): "
+        + ", ".join(prompt.prompt_id for prompt in prompts[:5])
+        + (", ..." if len(prompts) > 5 else "")
+    )
 
+    log_progress(
+        f"loading model {args.model_name} with transcoder_set={transcoder_set} dtype={args.dtype}"
+    )
     model = load_replacement_model(
         model_name=args.model_name,
         transcoder_set=transcoder_set,
@@ -69,6 +82,7 @@ def main() -> None:
         offload=args.offload,
         backend=args.backend,
     )
+    log_progress("model and transcoders loaded")
     config = TraceConfig(
         model_name=args.model_name,
         transcoder_set=transcoder_set,
@@ -80,7 +94,8 @@ def main() -> None:
         node_threshold=args.node_threshold,
         edge_threshold=args.edge_threshold,
     )
-    for prompt in prompts:
+    for index, prompt in enumerate(prompts, start=1):
+        log_progress(f"starting prompt {index}/{len(prompts)}: {prompt.prompt_id}")
         result = trace_prompt(
             model=model,
             prompt=prompt,

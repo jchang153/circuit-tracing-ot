@@ -21,6 +21,7 @@ from .config import (
     DEFAULT_RUN_DIR,
     MODEL_NAME,
 )
+from .logging import log_progress
 from .mcqa_prompts import MCQAPrompt
 
 
@@ -66,6 +67,7 @@ def trace_prompt(
 
     graph_path = graph_dir / f"{prompt.slug}.pt"
     start = perf_counter()
+    log_progress(f"running attribution for {prompt.prompt_id}")
     graph = attribute(
         prompt.prompt,
         model,
@@ -74,8 +76,13 @@ def trace_prompt(
         desired_logit_prob=float(config.desired_logit_prob),
         max_feature_nodes=config.max_feature_nodes,
     )
+    log_progress(f"saving raw graph to {graph_path}")
     graph.to_pt(graph_path)
 
+    log_progress(
+        f"exporting/pruning graph files to {graph_file_dir} "
+        f"(node_threshold={config.node_threshold}, edge_threshold={config.edge_threshold})"
+    )
     create_graph_files(
         graph_or_path=graph_path,
         slug=prompt.slug,
@@ -93,6 +100,7 @@ def trace_prompt(
         elapsed_seconds=float(elapsed),
     )
     manifest_path = run_dir / f"{prompt.slug}.json"
+    log_progress(f"writing run manifest to {manifest_path}")
     manifest_path.write_text(
         json.dumps(
             {
