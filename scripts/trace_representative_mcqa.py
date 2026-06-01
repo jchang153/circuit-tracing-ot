@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--transcoder-set", default=None)
     parser.add_argument("--dtype", default="bf16", choices=("bf16", "fp16", "fp32"))
     parser.add_argument("--offload", default=None, choices=(None, "cpu", "disk"))
-    parser.add_argument("--backend", default=None)
+    parser.add_argument("--backend", default=None, choices=("nnsight", "transformerlens"))
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--max-n-logits", type=int, default=10)
     parser.add_argument("--desired-logit-prob", type=float, default=0.95)

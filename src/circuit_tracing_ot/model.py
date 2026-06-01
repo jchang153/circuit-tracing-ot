@@ -18,12 +18,11 @@ def parse_dtype(dtype_name: str):
     raise ValueError(f"Unsupported dtype {dtype_name!r}; use bf16, fp16, or fp32.")
 
 
-def check_cuda_usable(*, backend: str | None) -> None:
+def check_cuda_usable() -> None:
     """Fail early when a visible GPU cannot be used by the installed PyTorch build."""
     cuda_available = torch.cuda.is_available()
     cuda_device_count = torch.cuda.device_count()
-    should_use_cuda = backend == "cuda" or (backend is None and cuda_device_count > 0)
-    if should_use_cuda and not cuda_available:
+    if cuda_device_count > 0 and not cuda_available:
         raise RuntimeError(
             "A CUDA GPU is visible, but PyTorch cannot initialize CUDA. This usually means the "
             "installed torch wheel is incompatible with the cluster NVIDIA driver. On Delta, "
@@ -50,7 +49,13 @@ def load_replacement_model(
     backend: str | None = None,
 ):
     """Load Gemma-2-2B plus CLTs as a circuit-tracer ReplacementModel."""
-    check_cuda_usable(backend=backend)
+    if backend == "cuda":
+        raise ValueError(
+            "--backend cuda is not valid for circuit-tracer. The backend must be 'nnsight' or "
+            "'transformerlens'; CUDA device use is controlled by the installed PyTorch build. "
+            "Omit --backend for the default behavior."
+        )
+    check_cuda_usable()
     from circuit_tracer import ReplacementModel
 
     kwargs: dict[str, object] = {

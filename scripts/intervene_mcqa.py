@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--transcoder-set", default=None)
     parser.add_argument("--dtype", default="bf16", choices=("bf16", "fp16", "fp32"))
     parser.add_argument("--offload", default=None, choices=(None, "cpu", "disk"))
-    parser.add_argument("--backend", default=None)
+    parser.add_argument("--backend", default=None, choices=("nnsight", "transformerlens"))
     parser.add_argument(
         "--feature",
         action="append",
