@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import perf_counter
@@ -33,27 +34,16 @@ def export_graph_files(
     """Export graph files across circuit-tracer versions with different output_path semantics."""
     from circuit_tracer.utils import create_graph_files
 
-    try:
-        create_graph_files(
-            graph_or_path=graph_path,
-            slug=slug,
-            output_path=graph_file_dir,
-            node_threshold=float(node_threshold),
-            edge_threshold=float(edge_threshold),
-        )
-    except AssertionError as exc:
-        if "Could not find" not in str(exc):
-            raise
-        log_progress(
-            "retrying graph export with JSON output path for this circuit-tracer version"
-        )
-        create_graph_files(
-            graph_or_path=graph_path,
-            slug=slug,
-            output_path=graph_file_dir / f"{slug}.json",
-            node_threshold=float(node_threshold),
-            edge_threshold=float(edge_threshold),
-        )
+    output_path = str(graph_file_dir)
+    if not output_path.endswith(os.sep):
+        output_path += os.sep
+    create_graph_files(
+        graph_or_path=graph_path,
+        slug=slug,
+        output_path=output_path,
+        node_threshold=float(node_threshold),
+        edge_threshold=float(edge_threshold),
+    )
 
 
 @dataclass(frozen=True)
