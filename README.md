@@ -87,7 +87,7 @@ python scripts/trace_representative_mcqa.py
 ```
 
 By default this keeps 1,000 selected feature nodes, exports the viewer graph with
-`node_threshold=1.0` and `edge_threshold=0.98`, and writes a flat result directory:
+`node_threshold=1.0` and `edge_threshold=1.0`, and writes a flat result directory:
 
 ```text
 results/delta_default_train_0/
@@ -96,6 +96,10 @@ results/delta_default_train_0/
   default-train-0.manifest.json
   graph-metadata.json
 ```
+
+`graph-metadata.json` is enriched after export with raw and viewer graph statistics, including
+selected feature-node counts, raw adjacency-matrix size, viewer node/link counts, counts by node
+type, per-layer/per-position decompositions, and node IDs grouped by type.
 
 Trace a specific dataset row by row id or formatted prompt id:
 
