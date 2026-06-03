@@ -86,6 +86,17 @@ Trace the first training prompt:
 python scripts/trace_representative_mcqa.py
 ```
 
+By default this keeps 1,000 selected feature nodes, exports the viewer graph with
+`node_threshold=1.0` and `edge_threshold=0.98`, and writes a flat result directory:
+
+```text
+results/delta_default_train_0/
+  default-train-0.pt
+  default-train-0.json
+  default-train-0.manifest.json
+  graph-metadata.json
+```
+
 Trace a specific dataset row by row id or formatted prompt id:
 
 ```bash
@@ -111,17 +122,24 @@ python scripts/trace_representative_mcqa.py \
 Outputs are written under:
 
 ```text
-graphs/
-graph_files/
-runs/
+results/delta_default_train_0/
 ```
 
-These are ignored by git because raw graphs and exported graph files can be large.
+These outputs are ignored by git because raw graphs and exported graph files can be large.
+
+To copy a completed Delta run back to your laptop from a local terminal:
+
+```bash
+rsync -avz jchang6@login.delta.ncsa.illinois.edu:~/circuit-tracing-ot/results/delta_default_train_0/ \
+  /Users/jchang153/Documents/GitHub/circuit-tracing-ot/results/delta_default_train_0/
+```
 
 ## Serve Graphs
 
 ```bash
-python scripts/serve_graphs.py --graph-file-dir graph_files --port 8046
+python scripts/serve_graphs.py \
+  --graph-file-dir results/delta_default_train_0 \
+  --port 8046
 ```
 
 Then open:

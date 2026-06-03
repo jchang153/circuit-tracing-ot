@@ -2,13 +2,17 @@
 .venv/
 __pycache__/
 *.py[cod]
+*.egg-info/
 .ipynb_checkpoints/
 
 # Local model/data caches and heavy outputs.
 .cache/
 graphs/
+graphs_*/
 graph_files/
+graph_files_*/
 runs/
+runs_*/
 results/
 data/
 

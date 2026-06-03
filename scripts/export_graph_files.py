@@ -6,6 +6,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from circuit_tracing_ot.config import (
+    DEFAULT_EDGE_THRESHOLD,
+    DEFAULT_GRAPH_FILE_DIR,
+    DEFAULT_NODE_THRESHOLD,
+)
 from circuit_tracing_ot.logging import log_progress
 from circuit_tracing_ot.trace import export_graph_files
 
@@ -14,9 +19,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("graph_path", type=Path)
     parser.add_argument("--slug", default=None)
-    parser.add_argument("--graph-file-dir", type=Path, default=Path("graph_files"))
-    parser.add_argument("--node-threshold", type=float, default=0.8)
-    parser.add_argument("--edge-threshold", type=float, default=0.98)
+    parser.add_argument("--graph-file-dir", type=Path, default=DEFAULT_GRAPH_FILE_DIR)
+    parser.add_argument("--node-threshold", type=float, default=DEFAULT_NODE_THRESHOLD)
+    parser.add_argument("--edge-threshold", type=float, default=DEFAULT_EDGE_THRESHOLD)
     return parser.parse_args()
 
 

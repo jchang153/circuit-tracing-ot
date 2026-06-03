@@ -6,7 +6,17 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from circuit_tracing_ot.config import resolve_transcoder_set
+from circuit_tracing_ot.config import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_DESIRED_LOGIT_PROB,
+    DEFAULT_EDGE_THRESHOLD,
+    DEFAULT_MAX_FEATURE_NODES,
+    DEFAULT_MAX_N_LOGITS,
+    DEFAULT_NODE_THRESHOLD,
+    DEFAULT_RESULT_DIR,
+    MODEL_NAME,
+    resolve_transcoder_set,
+)
 from circuit_tracing_ot.logging import log_progress
 from circuit_tracing_ot.mcqa_prompts import (
     DEFAULT_DATASET_CONFIG,
@@ -25,21 +35,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-name", default=DEFAULT_DATASET_NAME)
     parser.add_argument("--dataset-config", default=DEFAULT_DATASET_CONFIG)
     parser.add_argument("--dataset-split", default=DEFAULT_DATASET_SPLIT)
-    parser.add_argument("--model-name", default="google/gemma-2-2b")
+    parser.add_argument("--model-name", default=MODEL_NAME)
     parser.add_argument("--transcoder-size", default="426k", choices=("426k", "2.5m"))
     parser.add_argument("--transcoder-set", default=None)
     parser.add_argument("--dtype", default="bf16", choices=("bf16", "fp16", "fp32"))
     parser.add_argument("--offload", default=None, choices=(None, "cpu", "disk"))
     parser.add_argument("--backend", default=None, choices=("nnsight", "transformerlens"))
-    parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--max-n-logits", type=int, default=10)
-    parser.add_argument("--desired-logit-prob", type=float, default=0.95)
-    parser.add_argument("--max-feature-nodes", type=int, default=None)
-    parser.add_argument("--node-threshold", type=float, default=0.8)
-    parser.add_argument("--edge-threshold", type=float, default=0.98)
-    parser.add_argument("--graph-dir", type=Path, default=Path("graphs"))
-    parser.add_argument("--graph-file-dir", type=Path, default=Path("graph_files"))
-    parser.add_argument("--run-dir", type=Path, default=Path("runs"))
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--max-n-logits", type=int, default=DEFAULT_MAX_N_LOGITS)
+    parser.add_argument("--desired-logit-prob", type=float, default=DEFAULT_DESIRED_LOGIT_PROB)
+    parser.add_argument("--max-feature-nodes", type=int, default=DEFAULT_MAX_FEATURE_NODES)
+    parser.add_argument("--node-threshold", type=float, default=DEFAULT_NODE_THRESHOLD)
+    parser.add_argument("--edge-threshold", type=float, default=DEFAULT_EDGE_THRESHOLD)
+    parser.add_argument(
+        "--result-dir",
+        type=Path,
+        default=DEFAULT_RESULT_DIR,
+        help="Flat output directory copied back from Delta with one rsync command.",
+    )
+    parser.add_argument("--graph-dir", type=Path, default=None)
+    parser.add_argument("--graph-file-dir", type=Path, default=None)
+    parser.add_argument("--run-dir", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -47,7 +63,7 @@ def main() -> None:
     args = parse_args()
 
     from circuit_tracing_ot.model import load_replacement_model
-    from circuit_tracing_ot.trace import TraceConfig, trace_prompt
+    from circuit_tracing_ot.trace import TraceConfig, result_paths, trace_prompt
 
     transcoder_set = resolve_transcoder_set(args.transcoder_set, args.transcoder_size)
     log_progress(
@@ -94,15 +110,23 @@ def main() -> None:
         node_threshold=args.node_threshold,
         edge_threshold=args.edge_threshold,
     )
+    paths = result_paths(result_dir=args.result_dir)
+    graph_dir = args.graph_dir or paths.graph_dir
+    graph_file_dir = args.graph_file_dir or paths.graph_file_dir
+    run_dir = args.run_dir or paths.run_dir
+    log_progress(
+        f"writing outputs to graph_dir={graph_dir}, "
+        f"graph_file_dir={graph_file_dir}, run_dir={run_dir}"
+    )
     for index, prompt in enumerate(prompts, start=1):
         log_progress(f"starting prompt {index}/{len(prompts)}: {prompt.prompt_id}")
         result = trace_prompt(
             model=model,
             prompt=prompt,
             config=config,
-            graph_dir=args.graph_dir,
-            graph_file_dir=args.graph_file_dir,
-            run_dir=args.run_dir,
+            graph_dir=graph_dir,
+            graph_file_dir=graph_file_dir,
+            run_dir=run_dir,
         )
         print(
             f"traced {result.prompt_id}: graph={result.graph_path} "

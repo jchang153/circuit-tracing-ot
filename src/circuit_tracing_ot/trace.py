@@ -14,8 +14,10 @@ from .config import (
     DEFAULT_EDGE_THRESHOLD,
     DEFAULT_GRAPH_DIR,
     DEFAULT_GRAPH_FILE_DIR,
+    DEFAULT_MAX_FEATURE_NODES,
     DEFAULT_MAX_N_LOGITS,
     DEFAULT_NODE_THRESHOLD,
+    DEFAULT_RESULT_DIR,
     DEFAULT_RUN_DIR,
     MODEL_NAME,
 )
@@ -47,6 +49,24 @@ def export_graph_files(
 
 
 @dataclass(frozen=True)
+class ResultPaths:
+    """Output locations for a flat result directory."""
+
+    graph_dir: Path
+    graph_file_dir: Path
+    run_dir: Path
+
+
+def result_paths(result_dir: Path = DEFAULT_RESULT_DIR) -> ResultPaths:
+    """Return the standard flat result layout."""
+    return ResultPaths(
+        graph_dir=result_dir,
+        graph_file_dir=result_dir,
+        run_dir=result_dir,
+    )
+
+
+@dataclass(frozen=True)
 class TraceConfig:
     """Parameters for one circuit-tracer attribution run."""
 
@@ -56,7 +76,7 @@ class TraceConfig:
     batch_size: int = DEFAULT_BATCH_SIZE
     max_n_logits: int = DEFAULT_MAX_N_LOGITS
     desired_logit_prob: float = DEFAULT_DESIRED_LOGIT_PROB
-    max_feature_nodes: int | None = None
+    max_feature_nodes: int | None = DEFAULT_MAX_FEATURE_NODES
     node_threshold: float = DEFAULT_NODE_THRESHOLD
     edge_threshold: float = DEFAULT_EDGE_THRESHOLD
 
@@ -122,7 +142,7 @@ def trace_prompt(
         graph_file_dir=str(graph_file_dir),
         elapsed_seconds=float(elapsed),
     )
-    manifest_path = run_dir / f"{prompt.slug}.json"
+    manifest_path = run_dir / f"{prompt.slug}.manifest.json"
     log_progress(f"writing run manifest to {manifest_path}")
     manifest_path.write_text(
         json.dumps(
