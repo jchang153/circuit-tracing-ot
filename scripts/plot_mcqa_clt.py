@@ -53,7 +53,20 @@ DEFAULT_UOT_BETA_NEURALS = (0.1, 0.3, 1.0, 3.0)
 def parse_csv_ints(value: str | None) -> tuple[int, ...] | None:
     if value is None or not str(value).strip():
         return None
-    return tuple(int(item.strip()) for item in str(value).split(",") if item.strip())
+    parsed: list[int] = []
+    for item in str(value).split(","):
+        token = item.strip()
+        if not token:
+            continue
+        if "-" in token:
+            start_text, end_text = token.split("-", maxsplit=1)
+            start = int(start_text.strip())
+            end = int(end_text.strip())
+            step = 1 if end >= start else -1
+            parsed.extend(range(start, end + step, step))
+        else:
+            parsed.append(int(token))
+    return tuple(parsed)
 
 
 def parse_csv_floats(value: str | None) -> tuple[float, ...] | None:
@@ -95,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dtype", default="bf16", choices=("bf16", "fp16", "fp32"))
     parser.add_argument("--offload", default=None, choices=(None, "cpu", "disk"))
     parser.add_argument("--backend", default=None, choices=("nnsight", "transformerlens"))
-    parser.add_argument("--layers", help="Comma-separated layer indices. Default: all CLT layers.")
+    parser.add_argument("--layers", help="Comma-separated layer indices/ranges, e.g. 0-25 or 0,3,7. Default: all CLT layers.")
     parser.add_argument(
         "--token-position-id",
         default=DEFAULT_TOKEN_POSITION_ID,
