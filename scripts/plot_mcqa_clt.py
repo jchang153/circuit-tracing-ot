@@ -328,6 +328,12 @@ def solve_transport_only(
         transport, transport_meta = solve_ot_transport(variable_signatures_by_var, site_signatures_by_var, config)
     else:
         transport, transport_meta = solve_uot_transport(variable_signatures_by_var, site_signatures_by_var, config)
+    log_progress(
+        "Stage A transport solved "
+        f"method={config.method} epsilon={float(config.epsilon):g} "
+        f"beta={None if config.method == 'ot' else float(config.uot_beta_neural)} "
+        f"transport_shape={tuple(transport.shape)}"
+    )
     return variable_signatures_by_var, transport, transport_meta
 
 
@@ -371,10 +377,23 @@ def run_stage_a_config(
             "target_transport": transport[target_row_index : target_row_index + 1].tolist(),
         }
         row_ranking = target_row_ranking(row_payload, sites=sites)
+        log_progress(
+            "Stage A target row ranking "
+            f"target_var={target_var} top="
+            + ", ".join(
+                f"{entry['site_label']}:{float(entry['transport_mass']):.4g}"
+                for entry in row_ranking[: min(5, len(row_ranking))]
+            )
+        )
         candidate_records = []
         for rank_index, entry in enumerate(row_ranking[: max(1, int(row_top_k))]):
             site_index = int(entry["site_index"])
             site = sites[site_index]
+            log_progress(
+                "Stage A calibration candidate "
+                f"target_var={target_var} rank={rank_index + 1}/{max(1, int(row_top_k))} "
+                f"site={site.label} transport_mass={float(entry['transport_mass']):.4g}"
+            )
             calibration_result, calibration_ranking = evaluate_single_site_intervention_clt(
                 model=model,
                 bank=banks_by_split["calibration"][target_var],
@@ -388,6 +407,12 @@ def run_stage_a_config(
             calibration_score = stage_a_calibration_score(
                 result=calibration_result,
                 calibration_family_weights=calibration_family_weights,
+            )
+            log_progress(
+                "Stage A calibration candidate result "
+                f"target_var={target_var} site={site.label} "
+                f"exact_acc={float(calibration_result['exact_acc']):.4f} "
+                f"selection_score={float(calibration_score):.4f}"
             )
             candidate_records.append(
                 {
@@ -412,6 +437,12 @@ def run_stage_a_config(
                 float(record["transport_mass"]),
                 -int(record["rank_index"]),
             ),
+        )
+        log_progress(
+            "Stage A selected candidate "
+            f"target_var={target_var} site={best['site_label']} "
+            f"score={float(best['calibration_score']):.4f} "
+            f"exact_acc={float(best['calibration_exact_acc']):.4f}"
         )
         per_var_records[target_var] = {
             "method": method,
@@ -583,6 +614,10 @@ def main() -> None:
     )
     del filter_model
     torch.cuda.empty_cache()
+    log_progress(
+        "filtered dataset counts "
+        + ", ".join(f"{name}={len(rows)}" for name, rows in sorted(filtered_datasets.items()))
+    )
     banks_by_split, data_metadata = build_pair_banks(
         tokenizer=tokenizer,
         causal_model=causal_model,
@@ -594,6 +629,14 @@ def main() -> None:
         train_pool_size=int(args.train_pool_size),
         calibration_pool_size=int(args.calibration_pool_size),
         test_pool_size=int(args.test_pool_size),
+    )
+    log_progress(
+        "built MCQA pair banks "
+        + ", ".join(
+            f"{split}/{target_var}={bank.size}"
+            for split, banks_by_var in banks_by_split.items()
+            for target_var, bank in banks_by_var.items()
+        )
     )
 
     transcoder_set = resolve_transcoder_set(args.transcoder_set, args.transcoder_size)
@@ -620,6 +663,11 @@ def main() -> None:
         layers=layers,
         top_features=stage_a_layer_features,
     )
+    log_progress(
+        "Stage A layer sites "
+        f"count={len(layer_sites)} layers={[int(site.layer) for site in layer_sites]} "
+        f"copy_features={'all' if stage_a_layer_features is None else int(stage_a_layer_features)}"
+    )
     stage_a_config = OTConfig(
         method="ot",
         epsilon=1.0,
@@ -634,6 +682,10 @@ def main() -> None:
         config=stage_a_config,
         cache=cache,
     )
+    log_progress(
+        "Stage A prepared signatures "
+        f"sites={len(layer_sites)} runtime={float(prepared_stage_a.get('prepare_runtime_seconds', 0.0)):.1f}s"
+    )
 
     stage_a_payloads = []
     for method in stage_a_methods:
@@ -642,7 +694,15 @@ def main() -> None:
         for epsilon in ot_epsilons:
             betas = (None,) if method == "ot" else beta_neurals
             for beta in betas:
-                log_progress(f"Stage A method={method} epsilon={epsilon} beta={beta}")
+                config_index = len(stage_a_payloads) + 1
+                total_configs = sum(
+                    len(ot_epsilons) * (1 if candidate_method == "ot" else len(beta_neurals))
+                    for candidate_method in stage_a_methods
+                )
+                log_progress(
+                    f"Stage A config {config_index}/{total_configs} "
+                    f"method={method} epsilon={epsilon} beta={beta} sites={len(layer_sites)}"
+                )
                 payload = run_stage_a_config(
                     model=model,
                     tokenizer=tokenizer,
@@ -658,6 +718,12 @@ def main() -> None:
                     cache=cache,
                 )
                 stage_a_payloads.append(payload)
+                log_progress(
+                    "Stage A config complete "
+                    f"method={method} epsilon={epsilon} beta={beta} "
+                    f"mean_score={float(payload['mean_calibration_score']):.4f} "
+                    f"mean_exact={float(payload['mean_calibration_exact_acc']):.4f}"
+                )
     selected_stage_a = max(
         stage_a_payloads,
         key=lambda payload: (
@@ -666,6 +732,16 @@ def main() -> None:
         ),
     )
     stage_a_layer_rankings_by_var = build_stage_a_layer_rankings(stage_a_payloads=stage_a_payloads)
+    for target_var, ranking in stage_a_layer_rankings_by_var.items():
+        log_progress(
+            "Stage A layer ranking "
+            f"target_var={target_var} top="
+            + ", ".join(
+                f"L{int(record['layer'])}:score={float(record['selection_score']):.4f}"
+                for record in ranking[: min(5, len(ranking))]
+            )
+        )
+    log_progress("Stage A holdout evaluation start")
     stage_a_holdout = evaluate_stage_a_holdout(
         model=model,
         tokenizer=tokenizer,
@@ -674,6 +750,7 @@ def main() -> None:
         selected_config=selected_stage_a,
         cache=cache,
     )
+    log_progress("Stage A holdout evaluation complete")
     selected_layers = sorted(
         {
             int(record["layer"])
@@ -696,6 +773,11 @@ def main() -> None:
             )
             if not feature_sites:
                 continue
+            log_progress(
+                "Stage B feature sites "
+                f"layer={layer} count={len(feature_sites)} "
+                f"first_sites={[site.label for site in feature_sites[:5]]}"
+            )
             prepared_stage_b = prepare_alignment_artifacts_clt(
                 model=model,
                 fit_banks_by_var={target_var: banks_by_split["train"][target_var] for target_var in target_vars},

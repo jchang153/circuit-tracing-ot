@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Any
 
 import torch
 
 from ..clt_features import CLTFeatureValue, extract_clt_feature_values
 from ..interventions import FeatureIntervention
+from ..logging import log_progress
 from .data import MCQAPairBank
 from .metrics import signature_from_logits
+
+
+def _should_log_progress(index: int, total: int, *, interval: int = 10) -> bool:
+    return index == 0 or index == total - 1 or (index + 1) % max(1, int(interval)) == 0
 
 
 @dataclass(frozen=True)
@@ -124,7 +130,18 @@ def enumerate_top_clt_feature_sites(
     """Rank feature candidates by mean absolute source activation on D_train."""
     cache = cache or CLTActivationCache(model)
     scores: dict[tuple[int, int], float] = {}
+    start = perf_counter()
+    log_progress(
+        "Stage B feature candidate scan start "
+        f"target_var={bank.target_var} split={bank.split} examples={bank.size} "
+        f"layers={list(int(layer) for layer in layers)} read_top_k={int(activation_read_top_k)}"
+    )
     for row_index, source_input in enumerate(bank.source_inputs):
+        if _should_log_progress(row_index, bank.size):
+            log_progress(
+                "Stage B feature candidate scan "
+                f"row={row_index + 1}/{bank.size} elapsed={perf_counter() - start:.1f}s"
+            )
         prompt = str(source_input["raw_input"])
         position = int(bank.source_position_by_id[token_position_id][row_index].item())
         for layer in layers:
@@ -136,6 +153,10 @@ def enumerate_top_clt_feature_sites(
             ):
                 key = (int(layer), int(value.feature_idx))
                 scores[key] = scores.get(key, 0.0) + abs(float(value.value))
+    log_progress(
+        "Stage B feature candidate scan complete "
+        f"unique_features={len(scores)} elapsed={perf_counter() - start:.1f}s"
+    )
     sites: list[CLTSite] = []
     for layer in layers:
         layer_items = [
@@ -166,10 +187,18 @@ def _last_token_logits(logits: torch.Tensor) -> torch.Tensor:
 
 def collect_base_logits_clt(*, model, bank: MCQAPairBank) -> torch.Tensor:
     outputs = []
+    start = perf_counter()
+    log_progress(f"collecting base logits split={bank.split} target_var={bank.target_var} examples={bank.size}")
     with torch.inference_mode():
-        for base_input in bank.base_inputs:
+        for row_index, base_input in enumerate(bank.base_inputs):
+            if _should_log_progress(row_index, bank.size):
+                log_progress(
+                    "collecting base logits "
+                    f"row={row_index + 1}/{bank.size} elapsed={perf_counter() - start:.1f}s"
+                )
             logits, _ = model.feature_intervention(str(base_input["raw_input"]), [])
             outputs.append(_last_token_logits(logits))
+    log_progress(f"collected base logits examples={len(outputs)} elapsed={perf_counter() - start:.1f}s")
     return torch.stack(outputs, dim=0)
 
 
@@ -196,8 +225,22 @@ def run_clt_site_intervention(
 ) -> torch.Tensor:
     """Run CLT feature-value copying interventions and return last-token logits."""
     outputs = []
+    start = perf_counter()
+    site_labels = [site.label for site in site_weights]
+    log_progress(
+        "CLT intervention start "
+        f"split={bank.split} target_var={bank.target_var} examples={bank.size} "
+        f"sites={len(site_weights)} strength={float(strength):g} "
+        f"first_sites={site_labels[:3]}"
+    )
     with torch.inference_mode():
         for row_index, base_input in enumerate(bank.base_inputs):
+            if _should_log_progress(row_index, bank.size):
+                log_progress(
+                    "CLT intervention "
+                    f"row={row_index + 1}/{bank.size} target_var={bank.target_var} "
+                    f"sites={len(site_weights)} elapsed={perf_counter() - start:.1f}s"
+                )
             base_prompt = str(base_input["raw_input"])
             source_prompt = str(bank.source_inputs[row_index]["raw_input"])
             interventions: dict[tuple[int, int, int], float] = {}
@@ -237,6 +280,11 @@ def run_clt_site_intervention(
             ]
             logits, _ = model.feature_intervention(base_prompt, intervention_tuples)
             outputs.append(_last_token_logits(logits))
+    log_progress(
+        "CLT intervention complete "
+        f"target_var={bank.target_var} examples={len(outputs)} sites={len(site_weights)} "
+        f"elapsed={perf_counter() - start:.1f}s"
+    )
     return torch.stack(outputs, dim=0)
 
 
@@ -250,7 +298,19 @@ def collect_clt_site_signatures(
     cache: CLTActivationCache,
 ) -> torch.Tensor:
     signatures = []
-    for site in sites:
+    start = perf_counter()
+    log_progress(
+        "collecting CLT site signatures start "
+        f"split={bank.split} target_var={bank.target_var} sites={len(sites)} examples={bank.size} "
+        f"signature_mode={signature_mode}"
+    )
+    for site_index, site in enumerate(sites):
+        if _should_log_progress(site_index, len(sites), interval=1 if len(sites) <= 10 else 5):
+            log_progress(
+                "collecting CLT site signature "
+                f"site={site_index + 1}/{len(sites)} label={site.label} "
+                f"elapsed={perf_counter() - start:.1f}s"
+            )
         site_logits = run_clt_site_intervention(
             model=model,
             bank=bank,
@@ -266,4 +326,8 @@ def collect_clt_site_signatures(
                 signature_mode=signature_mode,
             )
         )
+    log_progress(
+        "collecting CLT site signatures complete "
+        f"sites={len(signatures)} elapsed={perf_counter() - start:.1f}s"
+    )
     return torch.stack(signatures, dim=0)

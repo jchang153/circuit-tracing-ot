@@ -16,6 +16,7 @@ from .clt_backend import (
     run_clt_site_intervention,
 )
 from .data import COUNTERFACTUAL_FAMILIES, MCQAPairBank, canonicalize_target_var
+from ..logging import log_progress
 from .metrics import (
     build_variable_signature,
     metrics_from_logits,
@@ -133,6 +134,12 @@ def solve_ot_transport(
 ) -> tuple[np.ndarray, dict[str, object]]:
     cost = _stack_cost_matrix(variable_signatures_by_var, site_signatures_by_var, config.source_target_vars)
     m, n = cost.shape
+    log_progress(
+        "solving balanced OT "
+        f"cost_shape={tuple(cost.shape)} epsilon={float(config.epsilon):g} "
+        f"max_iter={int(config.max_iter)}"
+    )
+    start = perf_counter()
     p = torch.full((m,), 1.0 / m, dtype=torch.float32, device=cost.device)
     q = torch.full((n,), 1.0 / n, dtype=torch.float32, device=cost.device)
     transport_tensor, transport_cost = sinkhorn_from_cost_matrix(
@@ -144,6 +151,11 @@ def solve_ot_transport(
         tol=float(config.tol),
     )
     transport = transport_tensor.detach().cpu().numpy()
+    log_progress(
+        "solved balanced OT "
+        f"transport_cost={float(transport_cost):.6g} matched_mass={float(transport.sum()):.6g} "
+        f"elapsed={perf_counter() - start:.2f}s"
+    )
     return transport, {
         "method": "ot",
         "regularization_used": float(config.epsilon),
@@ -162,6 +174,12 @@ def solve_uot_transport(
 ) -> tuple[np.ndarray, dict[str, object]]:
     cost = _stack_cost_matrix(variable_signatures_by_var, site_signatures_by_var, config.source_target_vars)
     m, n = cost.shape
+    log_progress(
+        "solving unbalanced OT "
+        f"cost_shape={tuple(cost.shape)} epsilon={float(config.epsilon):g} "
+        f"beta_neural={float(config.uot_beta_neural):g} max_iter={int(config.max_iter)}"
+    )
+    start = perf_counter()
     p = torch.full((m,), 1.0 / m, dtype=torch.float32, device=cost.device)
     q = torch.full((n,), 1.0 / n, dtype=torch.float32, device=cost.device)
     transport_tensor, info = sinkhorn_unbalanced_from_cost_matrix(
@@ -173,6 +191,11 @@ def solve_uot_transport(
         tau_neural=float(config.uot_beta_neural),
     )
     transport = transport_tensor.detach().cpu().numpy()
+    log_progress(
+        "solved unbalanced OT "
+        f"transport_cost={float(info['transport_cost']):.6g} "
+        f"matched_mass={float(info['matched_mass']):.6g} elapsed={perf_counter() - start:.2f}s"
+    )
     return transport, {
         "method": "uot",
         "regularization_used": float(config.epsilon),
@@ -322,6 +345,12 @@ def evaluate_single_site_intervention_clt(
     cache: CLTActivationCache,
     include_details: bool,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
+    log_progress(
+        "evaluating single CLT site "
+        f"split={bank.split} target_var={bank.target_var} site_index={site_index} "
+        f"site={site.label} examples={bank.size}"
+    )
+    start = perf_counter()
     logits = run_clt_site_intervention(
         model=model,
         bank=bank,
@@ -346,6 +375,11 @@ def evaluate_single_site_intervention_clt(
     }
     if include_details:
         record["prediction_details"] = prediction_details_from_logits(logits, bank, tokenizer=tokenizer)
+    log_progress(
+        "evaluated single CLT site "
+        f"target_var={bank.target_var} site={site.label} exact_acc={float(record['exact_acc']):.4f} "
+        f"elapsed={perf_counter() - start:.1f}s"
+    )
     return record, ranking
 
 
@@ -426,7 +460,17 @@ def select_hyperparameters_clt(
         for top_k in config.top_k_values
         for strength in config.lambda_values
     ]
-    for top_k, strength in candidates:
+    log_progress(
+        "calibration hyperparameter sweep start "
+        f"target_var={calibration_bank.target_var} candidates={len(candidates)} "
+        f"examples={calibration_bank.size}"
+    )
+    for candidate_index, (top_k, strength) in enumerate(candidates):
+        log_progress(
+            "calibration hyperparameter candidate "
+            f"{candidate_index + 1}/{len(candidates)} target_var={calibration_bank.target_var} "
+            f"top_k={top_k} lambda={strength:g}"
+        )
         truncated = truncate_transport_rows(
             selection_transport,
             top_k,
@@ -455,6 +499,11 @@ def select_hyperparameters_clt(
             "calibration_metric": str(config.calibration_metric),
         }
         sweep_records.append(candidate)
+        log_progress(
+            "calibration hyperparameter result "
+            f"{candidate_index + 1}/{len(candidates)} exact_acc={float(candidate['exact_acc']):.4f} "
+            f"selection_score={float(candidate['calibration_score']):.4f}"
+        )
         if best is None or (
             float(candidate["calibration_score"]),
             float(candidate["exact_acc"]),
@@ -465,6 +514,12 @@ def select_hyperparameters_clt(
             best = candidate
     if best is None:
         raise RuntimeError(f"Failed to select OT/UOT hyperparameters for {calibration_bank.target_var}")
+    log_progress(
+        "calibration hyperparameter sweep selected "
+        f"target_var={calibration_bank.target_var} top_k={int(best['top_k'])} "
+        f"lambda={float(best['lambda']):g} exact_acc={float(best['exact_acc']):.4f} "
+        f"selection_score={float(best['calibration_score']):.4f}"
+    )
     return best, sweep_records
 
 
