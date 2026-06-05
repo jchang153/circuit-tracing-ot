@@ -317,7 +317,7 @@ def filter_correct_examples_with_hf_model(
 def solve_transport_only(
     *,
     fit_banks_by_var,
-    site_signatures_by_var,
+    site_signatures,
     config: OTConfig,
 ) -> tuple[dict[str, torch.Tensor], object, dict[str, object]]:
     variable_signatures_by_var = {
@@ -325,9 +325,9 @@ def solve_transport_only(
         for target_var in config.source_target_vars
     }
     if config.method == "ot":
-        transport, transport_meta = solve_ot_transport(variable_signatures_by_var, site_signatures_by_var, config)
+        transport, transport_meta = solve_ot_transport(variable_signatures_by_var, site_signatures, config)
     else:
-        transport, transport_meta = solve_uot_transport(variable_signatures_by_var, site_signatures_by_var, config)
+        transport, transport_meta = solve_uot_transport(variable_signatures_by_var, site_signatures, config)
     log_progress(
         "Stage A transport solved "
         f"method={config.method} epsilon={float(config.epsilon):g} "
@@ -366,7 +366,7 @@ def run_stage_a_config(
     )
     _variable_signatures, transport, transport_meta = solve_transport_only(
         fit_banks_by_var={target_var: banks_by_split["train"][target_var] for target_var in target_vars},
-        site_signatures_by_var=prepared_artifacts["site_signatures_by_var"],
+        site_signatures=prepared_artifacts["site_signatures"],
         config=config,
     )
     normalized_transport = normalize_transport_rows(transport)

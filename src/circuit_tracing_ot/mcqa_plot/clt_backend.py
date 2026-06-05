@@ -222,14 +222,16 @@ def run_clt_site_intervention(
     site_weights: dict[CLTSite, float],
     strength: float,
     cache: CLTActivationCache,
+    log_context: str | None = None,
 ) -> torch.Tensor:
     """Run CLT feature-value copying interventions and return last-token logits."""
     outputs = []
     start = perf_counter()
     site_labels = [site.label for site in site_weights]
+    context = str(log_context) if log_context is not None else f"target_var={bank.target_var}"
     log_progress(
         "CLT intervention start "
-        f"split={bank.split} target_var={bank.target_var} examples={bank.size} "
+        f"split={bank.split} {context} examples={bank.size} "
         f"sites={len(site_weights)} strength={float(strength):g} "
         f"first_sites={site_labels[:3]}"
     )
@@ -238,7 +240,7 @@ def run_clt_site_intervention(
             if _should_log_progress(row_index, bank.size):
                 log_progress(
                     "CLT intervention "
-                    f"row={row_index + 1}/{bank.size} target_var={bank.target_var} "
+                    f"row={row_index + 1}/{bank.size} {context} "
                     f"sites={len(site_weights)} elapsed={perf_counter() - start:.1f}s"
                 )
             base_prompt = str(base_input["raw_input"])
@@ -282,7 +284,7 @@ def run_clt_site_intervention(
             outputs.append(_last_token_logits(logits))
     log_progress(
         "CLT intervention complete "
-        f"target_var={bank.target_var} examples={len(outputs)} sites={len(site_weights)} "
+        f"{context} examples={len(outputs)} sites={len(site_weights)} "
         f"elapsed={perf_counter() - start:.1f}s"
     )
     return torch.stack(outputs, dim=0)
@@ -301,7 +303,7 @@ def collect_clt_site_signatures(
     start = perf_counter()
     log_progress(
         "collecting CLT site signatures start "
-        f"split={bank.split} target_var={bank.target_var} sites={len(sites)} examples={bank.size} "
+        f"split={bank.split} reference_bank={bank.target_var} sites={len(sites)} examples={bank.size} "
         f"signature_mode={signature_mode}"
     )
     for site_index, site in enumerate(sites):
@@ -317,6 +319,7 @@ def collect_clt_site_signatures(
             site_weights={site: 1.0},
             strength=1.0,
             cache=cache,
+            log_context="site_signature",
         )
         signatures.append(
             signature_from_logits(

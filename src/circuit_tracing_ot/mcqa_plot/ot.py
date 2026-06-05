@@ -52,17 +52,14 @@ def _balanced_marginal_error(pi: torch.Tensor, p: torch.Tensor, q: torch.Tensor)
 
 def _stack_cost_matrix(
     variable_signatures_by_var: dict[str, torch.Tensor],
-    site_signatures_by_var: dict[str, torch.Tensor],
+    site_signatures: torch.Tensor,
     source_target_vars: tuple[str, ...],
 ) -> torch.Tensor:
     rows = []
+    reshaped_site_signatures = site_signatures.reshape(site_signatures.shape[0], -1)
     for target_var in source_target_vars:
         variable_signature = variable_signatures_by_var[target_var].reshape(1, -1)
-        site_signatures = site_signatures_by_var[target_var].reshape(
-            site_signatures_by_var[target_var].shape[0],
-            -1,
-        )
-        rows.append(_squared_euclidean_cost(variable_signature, site_signatures))
+        rows.append(_squared_euclidean_cost(variable_signature, reshaped_site_signatures))
     return torch.cat(rows, dim=0)
 
 
@@ -129,10 +126,10 @@ def sinkhorn_unbalanced_from_cost_matrix(
 
 def solve_ot_transport(
     variable_signatures_by_var: dict[str, torch.Tensor],
-    site_signatures_by_var: dict[str, torch.Tensor],
+    site_signatures: torch.Tensor,
     config: OTConfig,
 ) -> tuple[np.ndarray, dict[str, object]]:
-    cost = _stack_cost_matrix(variable_signatures_by_var, site_signatures_by_var, config.source_target_vars)
+    cost = _stack_cost_matrix(variable_signatures_by_var, site_signatures, config.source_target_vars)
     m, n = cost.shape
     log_progress(
         "solving balanced OT "
@@ -169,10 +166,10 @@ def solve_ot_transport(
 
 def solve_uot_transport(
     variable_signatures_by_var: dict[str, torch.Tensor],
-    site_signatures_by_var: dict[str, torch.Tensor],
+    site_signatures: torch.Tensor,
     config: OTConfig,
 ) -> tuple[np.ndarray, dict[str, object]]:
-    cost = _stack_cost_matrix(variable_signatures_by_var, site_signatures_by_var, config.source_target_vars)
+    cost = _stack_cost_matrix(variable_signatures_by_var, site_signatures, config.source_target_vars)
     m, n = cost.shape
     log_progress(
         "solving unbalanced OT "
@@ -293,8 +290,9 @@ def prepare_alignment_artifacts_clt(
     start = perf_counter()
     reference_target_var = str(next(iter(fit_banks_by_var)))
     reference_bank = fit_banks_by_var[reference_target_var]
-    print(
-        f"[CLT OT prep] shared site signatures reference_target={reference_target_var} "
+    log_progress(
+        "CLT OT prep shared site signatures "
+        f"reference_bank={reference_target_var} "
         f"examples={reference_bank.size} sites={len(sites)}"
     )
     shared_base_logits = collect_base_logits_clt(model=model, bank=reference_bank)
@@ -308,9 +306,7 @@ def prepare_alignment_artifacts_clt(
     )
     return {
         "base_logits_by_var": {str(target_var): shared_base_logits for target_var in fit_banks_by_var},
-        "site_signatures_by_var": {
-            str(target_var): shared_site_signatures for target_var in fit_banks_by_var
-        },
+        "site_signatures": shared_site_signatures,
         "prepare_runtime_seconds": float(perf_counter() - start),
     }
 
@@ -548,12 +544,12 @@ def run_alignment_pipeline_clt(
         target_var: build_variable_signature(fit_banks_by_var[target_var], config.signature_mode)
         for target_var in config.source_target_vars
     }
-    site_signatures_by_var = prepared_artifacts["site_signatures_by_var"]
+    site_signatures = prepared_artifacts["site_signatures"]
     transport_start = perf_counter()
     if config.method == "ot":
-        transport, transport_meta = solve_ot_transport(variable_signatures_by_var, site_signatures_by_var, config)
+        transport, transport_meta = solve_ot_transport(variable_signatures_by_var, site_signatures, config)
     elif config.method == "uot":
-        transport, transport_meta = solve_uot_transport(variable_signatures_by_var, site_signatures_by_var, config)
+        transport, transport_meta = solve_uot_transport(variable_signatures_by_var, site_signatures, config)
     else:
         raise ValueError(f"Unsupported method {config.method}")
     transport_solve_seconds = float(perf_counter() - transport_start)
