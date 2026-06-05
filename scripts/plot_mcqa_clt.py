@@ -133,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--filter-batch-size",
         type=int,
         default=32,
-        help="Prompt batch size for ReplacementModel no-op filtering. Falls back to one prompt if unsupported.",
+        help="Prompt batch size for plain-HF factual filtering.",
     )
     parser.add_argument("--skip-stage-b", action="store_true")
     return parser
@@ -144,83 +144,93 @@ def write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def last_token_logits(logits: torch.Tensor) -> torch.Tensor:
-    if logits.ndim == 3:
-        return logits.squeeze(0)[-1].detach().cpu()
-    if logits.ndim == 2:
-        return logits[-1].detach().cpu()
-    raise ValueError(f"Unexpected logits shape: {tuple(logits.shape)}")
-
-
-def last_token_logits_batch(logits: torch.Tensor) -> torch.Tensor:
-    if logits.ndim == 3:
-        return logits[:, -1].detach().cpu()
-    if logits.ndim == 2:
-        return logits.detach().cpu()
-    raise ValueError(f"Unexpected batched logits shape: {tuple(logits.shape)}")
-
-
-def predicted_token_id_single(model, prompt: str) -> int:
-    with torch.inference_mode():
-        logits, _ = model.feature_intervention(prompt, [])
-    return int(last_token_logits(logits).argmax(dim=-1).item())
-
-
-def predicted_token_ids(
-    model,
-    prompts: list[str],
+def load_filter_model_and_tokenizer(
     *,
+    model_name: str,
+    dtype_name: str,
+    hf_token: str | None,
+):
+    """Load a plain HF causal LM for original-style batched factual filtering."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from circuit_tracing_ot.model import check_cuda_usable, parse_dtype
+
+    check_cuda_usable()
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for MCQA filtering.")
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
+    if getattr(tokenizer, "pad_token", None) is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=parse_dtype(dtype_name),
+        token=hf_token,
+        attn_implementation="eager",
+    )
+    model.to("cuda")
+    model.eval()
+    log_progress(
+        "loaded HF filter model "
+        f"device={next(model.parameters()).device} cuda={torch.cuda.get_device_name(0)}"
+    )
+    return model, tokenizer
+
+
+def build_position_ids_from_left_padded_attention_mask(attention_mask: torch.Tensor) -> torch.Tensor:
+    position_ids = attention_mask.long().cumsum(dim=-1) - 1
+    return position_ids.masked_fill(attention_mask == 0, 0)
+
+
+def infer_next_token_ids_hf(
+    model,
+    *,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+) -> torch.Tensor:
+    position_ids = build_position_ids_from_left_padded_attention_mask(attention_mask)
+    with torch.inference_mode():
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            use_cache=False,
+        )
+    logits = outputs.logits
+    reversed_mask = torch.flip(attention_mask.long(), dims=(1,))
+    trailing_pad = torch.argmax(reversed_mask, dim=1)
+    last_indices = logits.shape[1] - 1 - trailing_pad
+    batch_indices = torch.arange(logits.shape[0], device=logits.device)
+    return logits[batch_indices, last_indices].argmax(dim=-1)
+
+
+def predicted_token_ids_hf(
+    *,
+    model,
+    tokenizer,
+    prompts: list[str],
     batch_size: int,
 ) -> list[int]:
-    tokenizer = model.tokenizer
     batch_size = max(1, int(batch_size))
-    predictions: list[int | None] = [None] * len(prompts)
-    indices_by_length: dict[int, list[int]] = {}
-    for index, prompt in enumerate(prompts):
-        token_ids = tokenizer.encode(prompt, add_special_tokens=True)
-        indices_by_length.setdefault(len(token_ids), []).append(index)
-
-    warned_batch_fallback = False
-    for token_length, indices in sorted(indices_by_length.items()):
-        log_progress(
-            f"filtering {len(indices)} prompt(s) with token_length={token_length} "
-            f"batch_size={batch_size}"
+    predictions: list[int] = []
+    device = next(model.parameters()).device
+    for start in range(0, len(prompts), batch_size):
+        batch_prompts = prompts[start : start + batch_size]
+        encoded = tokenizer(
+            batch_prompts,
+            return_tensors="pt",
+            padding=True,
+            add_special_tokens=True,
         )
-        for start in range(0, len(indices), batch_size):
-            batch_indices = indices[start : start + batch_size]
-            batch_prompts = [prompts[index] for index in batch_indices]
-            if len(batch_prompts) > 1:
-                try:
-                    with torch.inference_mode():
-                        logits, _ = model.feature_intervention(batch_prompts, [])
-                    batch_logits = last_token_logits_batch(logits)
-                    batch_predictions = [
-                        int(token_id)
-                        for token_id in batch_logits.argmax(dim=-1).detach().cpu().tolist()
-                    ]
-                    if len(batch_predictions) != len(batch_indices):
-                        raise RuntimeError(
-                            "batched feature_intervention returned "
-                            f"{len(batch_predictions)} predictions for {len(batch_indices)} prompts"
-                        )
-                    for index, prediction in zip(batch_indices, batch_predictions, strict=True):
-                        predictions[index] = int(prediction)
-                    continue
-                except Exception as exc:
-                    if not warned_batch_fallback:
-                        warned_batch_fallback = True
-                        log_progress(
-                            "ReplacementModel length-bucketed batched filtering is unsupported; "
-                            "falling back to one prompt at a time for failing buckets "
-                            f"({type(exc).__name__}: {exc})"
-                        )
-            for index in batch_indices:
-                predictions[index] = predicted_token_id_single(model, prompts[index])
-
-    missing = [index for index, prediction in enumerate(predictions) if prediction is None]
-    if missing:
-        raise RuntimeError(f"Missing predictions for prompt indices: {missing[:10]}")
-    return [int(prediction) for prediction in predictions]
+        input_ids = encoded["input_ids"].to(device)
+        attention_mask = encoded["attention_mask"].to(device)
+        batch_predictions = infer_next_token_ids_hf(
+            model,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
+        predictions.extend(int(token_id) for token_id in batch_predictions.detach().cpu().tolist())
+    return predictions
 
 
 def encode_symbol_variants(symbol: str, tokenizer) -> set[int]:
@@ -232,16 +242,16 @@ def encode_symbol_variants(symbol: str, tokenizer) -> set[int]:
     return variants
 
 
-def filter_correct_examples_with_replacement_model(
+def filter_correct_examples_with_hf_model(
     *,
     model,
+    tokenizer,
     causal_model: MCQACausalModel,
     datasets_by_name: dict[str, list[dict[str, object]]],
     batch_size: int,
 ) -> dict[str, list[dict[str, object]]]:
-    """Original factual filtering, using ReplacementModel no-op logits."""
+    """Original factual filtering, using batched plain-HF next-token logits."""
     filtered: dict[str, list[dict[str, object]]] = {}
-    tokenizer = model.tokenizer
     for dataset_name, rows in datasets_by_name.items():
         kept = []
         log_progress(f"filtering {dataset_name} rows={len(rows)}")
@@ -261,14 +271,16 @@ def filter_correct_examples_with_replacement_model(
         source_expected_variants = [
             encode_symbol_variants(expected, tokenizer) for expected in source_expected_answers
         ]
-        base_predictions = predicted_token_ids(
-            model,
-            [str(base_input["raw_input"]) for base_input in base_inputs],
+        base_predictions = predicted_token_ids_hf(
+            model=model,
+            tokenizer=tokenizer,
+            prompts=[str(base_input["raw_input"]) for base_input in base_inputs],
             batch_size=int(batch_size),
         )
-        source_predictions = predicted_token_ids(
-            model,
-            [str(source_input["raw_input"]) for source_input in source_inputs],
+        source_predictions = predicted_token_ids_hf(
+            model=model,
+            tokenizer=tokenizer,
+            prompts=[str(source_input["raw_input"]) for source_input in source_inputs],
             batch_size=int(batch_size),
         )
         for row, base_predicted, source_predicted, base_variants, source_variants in zip(
@@ -530,22 +542,12 @@ def main() -> None:
     stage_a_methods = tuple(parse_csv_strings(args.stage_a_transport_methods) or ("uot",))
     stage_a_layer_features = parse_stage_a_layer_features(args.stage_a_layer_features)
 
-    transcoder_set = resolve_transcoder_set(args.transcoder_set, args.transcoder_size)
-    from circuit_tracing_ot.model import load_replacement_model
-
-    log_progress(f"loading ReplacementModel model={args.model_name} transcoder_set={transcoder_set}")
-    model = load_replacement_model(
+    log_progress(f"loading HF filter model model={args.model_name}")
+    filter_model, tokenizer = load_filter_model_and_tokenizer(
         model_name=args.model_name,
-        transcoder_set=transcoder_set,
         dtype_name=args.dtype,
-        offload=args.offload,
-        backend=args.backend,
+        hf_token=args.hf_token,
     )
-    tokenizer = model.tokenizer
-    if getattr(tokenizer, "pad_token", None) is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"
-
     causal_model = MCQACausalModel()
     token_positions = get_token_positions(tokenizer, causal_model)
     token_position_ids = tuple(token_position.id for token_position in token_positions)
@@ -559,12 +561,15 @@ def main() -> None:
         dataset_config=args.dataset_config or None,
         hf_token=args.hf_token,
     )
-    filtered_datasets = filter_correct_examples_with_replacement_model(
-        model=model,
+    filtered_datasets = filter_correct_examples_with_hf_model(
+        model=filter_model,
+        tokenizer=tokenizer,
         causal_model=causal_model,
         datasets_by_name=public_datasets,
         batch_size=int(args.filter_batch_size),
     )
+    del filter_model
+    torch.cuda.empty_cache()
     banks_by_split, data_metadata = build_pair_banks(
         tokenizer=tokenizer,
         causal_model=causal_model,
@@ -577,6 +582,21 @@ def main() -> None:
         calibration_pool_size=int(args.calibration_pool_size),
         test_pool_size=int(args.test_pool_size),
     )
+
+    transcoder_set = resolve_transcoder_set(args.transcoder_set, args.transcoder_size)
+    from circuit_tracing_ot.model import load_replacement_model
+
+    log_progress(f"loading ReplacementModel model={args.model_name} transcoder_set={transcoder_set}")
+    model = load_replacement_model(
+        model_name=args.model_name,
+        transcoder_set=transcoder_set,
+        dtype_name=args.dtype,
+        offload=args.offload,
+        backend=args.backend,
+    )
+    if getattr(model.tokenizer, "pad_token", None) is None:
+        model.tokenizer.pad_token = model.tokenizer.eos_token
+    model.tokenizer.padding_side = "left"
 
     num_layers = 26
     layers = parse_csv_ints(args.layers) or tuple(range(num_layers))
