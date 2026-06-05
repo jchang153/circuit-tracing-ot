@@ -173,6 +173,89 @@ layer:position:feature_idx:new_value
 
 Use `position=-1` for the final prompt position, matching the demo notebooks.
 
+## MCQA PLOT over CLT Features
+
+The CLT PLOT runner ports the MCQA experiment protocol from
+`jchang153/causal-abstractions-ot` and changes only the neural intervention backend:
+counterfactuals, factual filtering, `D_train`/`D_cal`/`D_te` split construction, Sinkhorn OT/UOT,
+calibration, and test evaluation follow the original MCQA PLOT code. Instead of residual-stream
+swaps, candidate sites call `ReplacementModel.feature_intervention` on CLT feature values.
+
+Run layer localization, then within-layer feature localization:
+
+```bash
+python scripts/plot_mcqa_clt.py \
+  --dataset-path jchang153/copycolors_mcqa \
+  --dataset-size 2000 \
+  --split-seed 0 \
+  --train-pool-size 200 \
+  --calibration-pool-size 100 \
+  --test-pool-size 100 \
+  --layers 0-25 \
+  --token-position-id last_token \
+  --stage-a-transport-methods uot \
+  --ot-epsilons 0.5,1.0,2.0,4.0 \
+  --uot-beta-neurals 0.1,0.3,1.0,3.0 \
+  --stage-a-row-top-k 6 \
+  --top-layers 4
+```
+
+For a Stage A-only layer-ranking run, add:
+
+```bash
+  --skip-stage-b \
+  --results-timestamp stage_a_layers
+```
+
+The result file is:
+
+```text
+results/mcqa_clt_mcqa_plot_clt/mcqa_plot_clt_results.json
+```
+
+With `--results-timestamp stage_a_layers`, the result file is:
+
+```text
+results/stage_a_layers_mcqa_plot_clt/mcqa_plot_clt_results.json
+```
+
+Stage A enumerates CLT layer sites, builds train-set signatures, solves the same OT/UOT
+transport rows as the original MCQA PLOT layer sweep, shortlists the top transport sites,
+evaluates those sites on `D_cal`, selects the best calibrated layer site, and evaluates it on
+`D_te`. Stage B enumerates top-activating CLT feature sites inside the selected layers, reuses
+the same signature/transport/calibration/test logic, and reports the selected features.
+For Stage A-only analysis, inspect `stage_a.layer_rankings_by_var`: it ranks the best calibrated
+CLT layer sites separately for `answer_pointer` and `answer_token`.
+
+To visualize the PLOT-selected features in the existing circuit-tracer viewer without applying
+additional pruning, first produce an unpruned trace for a representative prompt:
+
+```bash
+python scripts/trace_representative_mcqa.py \
+  --prompt-id 0 \
+  --max-feature-nodes 5000 \
+  --node-threshold 0.0 \
+  --edge-threshold 0.0 \
+  --result-dir results/unpruned_default_train_0
+```
+
+Then export a viewer graph centered on the selected PLOT features:
+
+```bash
+python scripts/export_plot_feature_graph.py \
+  --plot-results results/mcqa_clt_mcqa_plot_clt/mcqa_plot_clt_results.json \
+  --graph-json results/unpruned_default_train_0/default-train-0.json \
+  --graph-metadata results/unpruned_default_train_0/graph-metadata.json \
+  --output-dir results/plot_mcqa_clt/viewer \
+  --include-non-feature-nodes
+```
+
+Serve it with the same viewer:
+
+```bash
+python scripts/serve_graphs.py --graph-file-dir results/plot_mcqa_clt/viewer --port 8046
+```
+
 ## Notebook
 
 Open:
