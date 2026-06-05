@@ -68,6 +68,18 @@ def parse_csv_strings(value: str | None) -> tuple[str, ...] | None:
     return tuple(item.strip() for item in str(value).split(",") if item.strip())
 
 
+def parse_stage_a_layer_features(value: str | None) -> int | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"", "all", "full", "none"}:
+        return None
+    parsed = int(normalized)
+    if parsed <= 0:
+        raise ValueError("--stage-a-layer-features must be 'all' or a positive integer")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-path", default="jchang153/copycolors_mcqa")
@@ -84,7 +96,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--offload", default=None, choices=(None, "cpu", "disk"))
     parser.add_argument("--backend", default=None, choices=("nnsight", "transformerlens"))
     parser.add_argument("--layers", help="Comma-separated layer indices. Default: all CLT layers.")
-    parser.add_argument("--token-position-id", default=DEFAULT_TOKEN_POSITION_ID)
+    parser.add_argument(
+        "--token-position-id",
+        default=DEFAULT_TOKEN_POSITION_ID,
+        choices=(DEFAULT_TOKEN_POSITION_ID,),
+        help="MCQA PLOT CLT runs are restricted to the last token position.",
+    )
     parser.add_argument("--target-vars", default=",".join(DEFAULT_TARGET_VARS))
     parser.add_argument("--counterfactual-names", default=",".join(DEFAULT_COUNTERFACTUAL_NAMES))
     parser.add_argument("--signature-mode", default=DEFAULT_SIGNATURE_MODE)
@@ -95,7 +112,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=",".join(str(value) for value in DEFAULT_UOT_BETA_NEURALS),
     )
     parser.add_argument("--stage-a-row-top-k", type=int, default=6)
-    parser.add_argument("--stage-a-layer-top-features", type=int, default=256)
+    parser.add_argument(
+        "--stage-a-layer-features",
+        default="all",
+        help="Number of CLT features copied for each Stage A layer site, or 'all'. Default: all.",
+    )
     parser.add_argument("--top-layers", type=int, default=4)
     parser.add_argument("--stage-b-feature-candidates-per-layer", type=int, default=128)
     parser.add_argument("--stage-b-activation-read-top-k", type=int, default=512)
@@ -408,6 +429,7 @@ def main() -> None:
     stage_b_top_k_values = tuple(parse_csv_ints(args.stage_b_top_k_values) or (1, 2, 4))
     stage_b_lambdas = tuple(parse_csv_floats(args.stage_b_lambdas) or (0.5, 1.0, 2.0, 4.0))
     stage_a_methods = tuple(parse_csv_strings(args.stage_a_transport_methods) or ("uot",))
+    stage_a_layer_features = parse_stage_a_layer_features(args.stage_a_layer_features)
 
     transcoder_set = resolve_transcoder_set(args.transcoder_set, args.transcoder_size)
     from circuit_tracing_ot.model import load_replacement_model
@@ -463,7 +485,7 @@ def main() -> None:
         num_layers=num_layers,
         token_position_id=str(args.token_position_id),
         layers=layers,
-        top_features=int(args.stage_a_layer_top_features),
+        top_features=stage_a_layer_features,
     )
     stage_a_config = OTConfig(
         method="ot",
@@ -598,6 +620,9 @@ def main() -> None:
             "ot_epsilons": [float(value) for value in ot_epsilons],
             "uot_beta_neurals": [float(value) for value in beta_neurals],
             "calibration_family_weights": [float(value) for value in calibration_family_weights],
+            "stage_a_layer_features": "all"
+            if stage_a_layer_features is None
+            else int(stage_a_layer_features),
         },
         "data": data_metadata,
         "counterfactual_families": list(COUNTERFACTUAL_FAMILIES),

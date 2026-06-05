@@ -17,18 +17,20 @@ from .metrics import signature_from_logits
 class CLTSite:
     """One candidate CLT site.
 
-    ``feature_idx=None`` means a layer-level site: copy the top active CLT features in the source
-    prompt for that layer. A concrete ``feature_idx`` means copy only that feature.
+    ``feature_idx=None`` means a layer-level site: copy the full extracted CLT feature layer from
+    source to base. A concrete ``feature_idx`` means copy only that feature.
     """
 
     layer: int
     token_position_id: str
     feature_idx: int | None = None
-    top_features: int = 256
+    top_features: int | None = None
 
     @property
     def label(self) -> str:
         if self.feature_idx is None:
+            if self.top_features is None:
+                return f"CLT-L{int(self.layer)}:{self.token_position_id}:all"
             return f"CLT-L{int(self.layer)}:{self.token_position_id}:top{int(self.top_features)}"
         return f"CLT-L{int(self.layer)}:{self.token_position_id}:f{int(self.feature_idx)}"
 
@@ -38,7 +40,9 @@ class CLTSite:
 
     @property
     def dim_end(self) -> int:
-        return int(self.top_features) if self.feature_idx is None else int(self.feature_idx) + 1
+        if self.feature_idx is not None:
+            return int(self.feature_idx) + 1
+        return -1 if self.top_features is None else int(self.top_features)
 
 
 class CLTActivationCache:
@@ -93,7 +97,7 @@ def enumerate_clt_layer_sites(
     num_layers: int,
     token_position_id: str,
     layers: tuple[int, ...] | None,
-    top_features: int,
+    top_features: int | None,
 ) -> list[CLTSite]:
     layer_ids = tuple(range(int(num_layers))) if layers is None else tuple(int(layer) for layer in layers)
     return [
@@ -101,7 +105,7 @@ def enumerate_clt_layer_sites(
             layer=int(layer),
             token_position_id=str(token_position_id),
             feature_idx=None,
-            top_features=int(top_features),
+            top_features=None if top_features is None else int(top_features),
         )
         for layer in layer_ids
     ]
@@ -177,6 +181,8 @@ def _site_feature_ids(
     if site.feature_idx is not None:
         return [int(site.feature_idx)]
     ranked = sorted(source_values.items(), key=lambda item: (-abs(float(item[1])), int(item[0])))
+    if site.top_features is None:
+        return [int(feature_idx) for feature_idx, _value in ranked]
     return [int(feature_idx) for feature_idx, _value in ranked[: int(site.top_features)]]
 
 
@@ -198,7 +204,7 @@ def run_clt_site_intervention(
             for site, weight in site_weights.items():
                 base_position = int(bank.base_position_by_id[site.token_position_id][row_index].item())
                 source_position = int(bank.source_position_by_id[site.token_position_id][row_index].item())
-                read_top_k = int(site.top_features)
+                read_top_k = None if site.top_features is None else int(site.top_features)
                 source_values = cache.value_map(
                     prompt=source_prompt,
                     layer=int(site.layer),
@@ -211,7 +217,11 @@ def run_clt_site_intervention(
                     position=base_position,
                     top_k=read_top_k,
                 )
-                for feature_idx in _site_feature_ids(site=site, source_values=source_values):
+                if site.feature_idx is None and site.top_features is None:
+                    feature_ids = sorted(set(source_values) | set(base_values))
+                else:
+                    feature_ids = _site_feature_ids(site=site, source_values=source_values)
+                for feature_idx in feature_ids:
                     base_value = float(base_values.get(int(feature_idx), 0.0))
                     source_value = float(source_values.get(int(feature_idx), 0.0))
                     new_value = base_value + float(strength) * float(weight) * (source_value - base_value)

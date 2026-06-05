@@ -219,10 +219,11 @@ With `--results-timestamp stage_a_layers`, the result file is:
 results/stage_a_layers_mcqa_plot_clt/mcqa_plot_clt_results.json
 ```
 
-Stage A enumerates CLT layer sites, builds train-set signatures, solves the same OT/UOT
-transport rows as the original MCQA PLOT layer sweep, shortlists the top transport sites,
-evaluates those sites on `D_cal`, selects the best calibrated layer site, and evaluates it on
-`D_te`. Stage B enumerates top-activating CLT feature sites inside the selected layers, reuses
+Stage A enumerates CLT layer sites at `last_token`, copies the full extracted source CLT feature
+layer into the base prompt, builds train-set signatures, solves the same OT/UOT transport rows as
+the original MCQA PLOT layer sweep, shortlists the top transport sites, evaluates those sites on
+`D_cal`, selects the best calibrated layer site, and evaluates it on `D_te`. Stage B enumerates
+top-activating CLT feature sites inside the selected layers, reuses
 the same signature/transport/calibration/test logic, and reports the selected features.
 For Stage A-only analysis, inspect `stage_a.layer_rankings_by_var`: it ranks the best calibrated
 CLT layer sites separately for `answer_pointer` and `answer_token`.
