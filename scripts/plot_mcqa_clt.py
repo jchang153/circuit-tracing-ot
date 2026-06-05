@@ -129,6 +129,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--results-root", default="results")
     parser.add_argument("--results-timestamp")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"))
+    parser.add_argument(
+        "--filter-batch-size",
+        type=int,
+        default=32,
+        help="Prompt batch size for ReplacementModel no-op filtering. Falls back to one prompt if unsupported.",
+    )
     parser.add_argument("--skip-stage-b", action="store_true")
     return parser
 
@@ -146,10 +152,48 @@ def last_token_logits(logits: torch.Tensor) -> torch.Tensor:
     raise ValueError(f"Unexpected logits shape: {tuple(logits.shape)}")
 
 
-def predicted_token_id(model, prompt: str) -> int:
+def last_token_logits_batch(logits: torch.Tensor) -> torch.Tensor:
+    if logits.ndim == 3:
+        return logits[:, -1].detach().cpu()
+    if logits.ndim == 2:
+        return logits.detach().cpu()
+    raise ValueError(f"Unexpected batched logits shape: {tuple(logits.shape)}")
+
+
+def predicted_token_id_single(model, prompt: str) -> int:
     with torch.inference_mode():
         logits, _ = model.feature_intervention(prompt, [])
     return int(last_token_logits(logits).argmax(dim=-1).item())
+
+
+def predicted_token_ids(
+    model,
+    prompts: list[str],
+    *,
+    batch_size: int,
+) -> list[int]:
+    predictions: list[int] = []
+    batch_supported = True
+    for start in range(0, len(prompts), max(1, int(batch_size))):
+        batch_prompts = prompts[start : start + max(1, int(batch_size))]
+        if batch_supported and len(batch_prompts) > 1:
+            try:
+                with torch.inference_mode():
+                    logits, _ = model.feature_intervention(batch_prompts, [])
+                batch_logits = last_token_logits_batch(logits)
+                predictions.extend(
+                    int(token_id)
+                    for token_id in batch_logits.argmax(dim=-1).detach().cpu().tolist()
+                )
+                continue
+            except Exception as exc:
+                batch_supported = False
+                log_progress(
+                    "ReplacementModel batched filtering is unsupported; "
+                    f"falling back to one prompt at a time ({type(exc).__name__}: {exc})"
+                )
+        predictions.extend(predicted_token_id_single(model, prompt) for prompt in batch_prompts)
+    return predictions
 
 
 def encode_symbol_variants(symbol: str, tokenizer) -> set[int]:
@@ -166,6 +210,7 @@ def filter_correct_examples_with_replacement_model(
     model,
     causal_model: MCQACausalModel,
     datasets_by_name: dict[str, list[dict[str, object]]],
+    batch_size: int,
 ) -> dict[str, list[dict[str, object]]]:
     """Original factual filtering, using ReplacementModel no-op logits."""
     filtered: dict[str, list[dict[str, object]]] = {}
@@ -173,16 +218,43 @@ def filter_correct_examples_with_replacement_model(
     for dataset_name, rows in datasets_by_name.items():
         kept = []
         log_progress(f"filtering {dataset_name} rows={len(rows)}")
-        for row in rows:
-            base_input = row["input"]
-            source_input = row["counterfactual_inputs"][0]
-            base_expected = str(causal_model.run_forward(base_input)["raw_output"]).strip()
-            source_expected = str(causal_model.run_forward(source_input)["raw_output"]).strip()
-            base_predicted = predicted_token_id(model, str(base_input["raw_input"]))
-            source_predicted = predicted_token_id(model, str(source_input["raw_input"]))
+        base_inputs = [row["input"] for row in rows]
+        source_inputs = [row["counterfactual_inputs"][0] for row in rows]
+        base_expected_answers = [
+            str(causal_model.run_forward(base_input)["raw_output"]).strip()
+            for base_input in base_inputs
+        ]
+        source_expected_answers = [
+            str(causal_model.run_forward(source_input)["raw_output"]).strip()
+            for source_input in source_inputs
+        ]
+        base_expected_variants = [
+            encode_symbol_variants(expected, tokenizer) for expected in base_expected_answers
+        ]
+        source_expected_variants = [
+            encode_symbol_variants(expected, tokenizer) for expected in source_expected_answers
+        ]
+        base_predictions = predicted_token_ids(
+            model,
+            [str(base_input["raw_input"]) for base_input in base_inputs],
+            batch_size=int(batch_size),
+        )
+        source_predictions = predicted_token_ids(
+            model,
+            [str(source_input["raw_input"]) for source_input in source_inputs],
+            batch_size=int(batch_size),
+        )
+        for row, base_predicted, source_predicted, base_variants, source_variants in zip(
+            rows,
+            base_predictions,
+            source_predictions,
+            base_expected_variants,
+            source_expected_variants,
+            strict=True,
+        ):
             if (
-                base_predicted in encode_symbol_variants(base_expected, tokenizer)
-                and source_predicted in encode_symbol_variants(source_expected, tokenizer)
+                int(base_predicted) in base_variants
+                and int(source_predicted) in source_variants
             ):
                 kept.append(row)
         filtered[dataset_name] = kept
@@ -464,6 +536,7 @@ def main() -> None:
         model=model,
         causal_model=causal_model,
         datasets_by_name=public_datasets,
+        batch_size=int(args.filter_batch_size),
     )
     banks_by_split, data_metadata = build_pair_banks(
         tokenizer=tokenizer,
