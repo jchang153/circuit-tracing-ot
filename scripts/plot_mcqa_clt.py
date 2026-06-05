@@ -172,28 +172,55 @@ def predicted_token_ids(
     *,
     batch_size: int,
 ) -> list[int]:
-    predictions: list[int] = []
-    batch_supported = True
-    for start in range(0, len(prompts), max(1, int(batch_size))):
-        batch_prompts = prompts[start : start + max(1, int(batch_size))]
-        if batch_supported and len(batch_prompts) > 1:
-            try:
-                with torch.inference_mode():
-                    logits, _ = model.feature_intervention(batch_prompts, [])
-                batch_logits = last_token_logits_batch(logits)
-                predictions.extend(
-                    int(token_id)
-                    for token_id in batch_logits.argmax(dim=-1).detach().cpu().tolist()
-                )
-                continue
-            except Exception as exc:
-                batch_supported = False
-                log_progress(
-                    "ReplacementModel batched filtering is unsupported; "
-                    f"falling back to one prompt at a time ({type(exc).__name__}: {exc})"
-                )
-        predictions.extend(predicted_token_id_single(model, prompt) for prompt in batch_prompts)
-    return predictions
+    tokenizer = model.tokenizer
+    batch_size = max(1, int(batch_size))
+    predictions: list[int | None] = [None] * len(prompts)
+    indices_by_length: dict[int, list[int]] = {}
+    for index, prompt in enumerate(prompts):
+        token_ids = tokenizer.encode(prompt, add_special_tokens=True)
+        indices_by_length.setdefault(len(token_ids), []).append(index)
+
+    warned_batch_fallback = False
+    for token_length, indices in sorted(indices_by_length.items()):
+        log_progress(
+            f"filtering {len(indices)} prompt(s) with token_length={token_length} "
+            f"batch_size={batch_size}"
+        )
+        for start in range(0, len(indices), batch_size):
+            batch_indices = indices[start : start + batch_size]
+            batch_prompts = [prompts[index] for index in batch_indices]
+            if len(batch_prompts) > 1:
+                try:
+                    with torch.inference_mode():
+                        logits, _ = model.feature_intervention(batch_prompts, [])
+                    batch_logits = last_token_logits_batch(logits)
+                    batch_predictions = [
+                        int(token_id)
+                        for token_id in batch_logits.argmax(dim=-1).detach().cpu().tolist()
+                    ]
+                    if len(batch_predictions) != len(batch_indices):
+                        raise RuntimeError(
+                            "batched feature_intervention returned "
+                            f"{len(batch_predictions)} predictions for {len(batch_indices)} prompts"
+                        )
+                    for index, prediction in zip(batch_indices, batch_predictions, strict=True):
+                        predictions[index] = int(prediction)
+                    continue
+                except Exception as exc:
+                    if not warned_batch_fallback:
+                        warned_batch_fallback = True
+                        log_progress(
+                            "ReplacementModel length-bucketed batched filtering is unsupported; "
+                            "falling back to one prompt at a time for failing buckets "
+                            f"({type(exc).__name__}: {exc})"
+                        )
+            for index in batch_indices:
+                predictions[index] = predicted_token_id_single(model, prompts[index])
+
+    missing = [index for index, prediction in enumerate(predictions) if prediction is None]
+    if missing:
+        raise RuntimeError(f"Missing predictions for prompt indices: {missing[:10]}")
+    return [int(prediction) for prediction in predictions]
 
 
 def encode_symbol_variants(symbol: str, tokenizer) -> set[int]:
