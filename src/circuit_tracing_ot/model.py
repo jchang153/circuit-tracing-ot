@@ -40,6 +40,67 @@ def check_cuda_usable() -> None:
         )
 
 
+def _iter_module_parameters(value, *, max_depth: int = 3, _seen: set[int] | None = None):
+    """Yield parameters from common wrapped-model attributes without depending on one backend."""
+    if _seen is None:
+        _seen = set()
+    if max_depth < 0 or id(value) in _seen:
+        return
+    _seen.add(id(value))
+    if hasattr(value, "parameters"):
+        try:
+            yield from value.parameters()
+            return
+        except TypeError:
+            pass
+    for attr in ("model", "base_model", "hf_model", "wrapped_model", "tl_model"):
+        if hasattr(value, attr):
+            yield from _iter_module_parameters(
+                getattr(value, attr),
+                max_depth=max_depth - 1,
+                _seen=_seen,
+            )
+
+
+def infer_model_device(model) -> torch.device | None:
+    """Infer the device of a ReplacementModel-like object when possible."""
+    for parameter in _iter_module_parameters(model):
+        return parameter.device
+    for attr in ("device", "model_device"):
+        if hasattr(model, attr):
+            try:
+                return torch.device(getattr(model, attr))
+            except (TypeError, RuntimeError):
+                pass
+    return None
+
+
+def ensure_model_on_cuda(model):
+    """Move a model wrapper to CUDA when supported and verify device placement."""
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available to PyTorch in this environment.")
+    initial_device = infer_model_device(model)
+    if initial_device is not None and initial_device.type == "cuda":
+        return model
+    if hasattr(model, "to"):
+        moved = model.to("cuda")
+        if moved is not None:
+            model = moved
+    resolved_device = infer_model_device(model)
+    if resolved_device is None:
+        print(
+            "[model] warning: could not infer ReplacementModel parameter device; "
+            "continuing because PyTorch CUDA is available."
+        )
+        return model
+    if resolved_device.type != "cuda":
+        raise RuntimeError(
+            f"ReplacementModel appears to be on {resolved_device}, not CUDA. "
+            "Check the circuit-tracer backend/offload settings and PyTorch CUDA wheel."
+        )
+    return model
+
+
 def load_replacement_model(
     *,
     model_name: str = MODEL_NAME,
@@ -47,6 +108,7 @@ def load_replacement_model(
     dtype_name: str = "bf16",
     offload: str | None = None,
     backend: str | None = None,
+    require_cuda: bool = True,
 ):
     """Load Gemma-2-2B plus CLTs as a circuit-tracer ReplacementModel."""
     if backend == "cuda":
@@ -65,4 +127,13 @@ def load_replacement_model(
         kwargs["offload"] = offload
     if backend:
         kwargs["backend"] = backend
-    return ReplacementModel.from_pretrained(model_name, transcoder_set, **kwargs)
+    model = ReplacementModel.from_pretrained(model_name, transcoder_set, **kwargs)
+    if require_cuda:
+        model = ensure_model_on_cuda(model)
+    resolved_device = infer_model_device(model)
+    if resolved_device is not None:
+        print(f"[model] ReplacementModel device={resolved_device}")
+    print(f"[model] torch.cuda.is_available()={torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"[model] CUDA device={torch.cuda.get_device_name(0)}")
+    return model
