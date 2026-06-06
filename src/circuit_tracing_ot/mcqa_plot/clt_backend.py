@@ -58,6 +58,7 @@ class CLTActivationCache:
         self.model = model
         self._payload_by_prompt: dict[str, Any] = {}
         self._values_by_key: dict[tuple[str, int, int, int | None], list[CLTFeatureValue]] = {}
+        self._intervention_logits_by_key: dict[tuple[object, ...], torch.Tensor] = {}
 
     def payload(self, prompt: str) -> Any:
         if prompt not in self._payload_by_prompt:
@@ -96,6 +97,31 @@ class CLTActivationCache:
             int(value.feature_idx): float(value.value)
             for value in self.values(prompt=prompt, layer=layer, position=position, top_k=top_k)
         }
+
+    def get_intervention_logits(self, key: tuple[object, ...]) -> torch.Tensor | None:
+        return self._intervention_logits_by_key.get(key)
+
+    def set_intervention_logits(self, key: tuple[object, ...], logits: torch.Tensor) -> None:
+        self._intervention_logits_by_key[key] = logits
+
+
+def _bank_cache_key(bank: MCQAPairBank) -> tuple[object, ...]:
+    return (
+        id(bank),
+        bank.split,
+        bank.target_var,
+        bank.size,
+        tuple(bank.dataset_names),
+    )
+
+
+def _site_weights_cache_key(site_weights: dict[CLTSite, float]) -> tuple[tuple[str, float], ...]:
+    return tuple(
+        sorted(
+            ((site.label, float(weight)) for site, weight in site_weights.items()),
+            key=lambda item: item[0],
+        )
+    )
 
 
 def enumerate_clt_layer_sites(
@@ -225,6 +251,21 @@ def run_clt_site_intervention(
     log_context: str | None = None,
 ) -> torch.Tensor:
     """Run CLT feature-value copying interventions and return last-token logits."""
+    cache_key = (
+        "run_clt_site_intervention",
+        _bank_cache_key(bank),
+        _site_weights_cache_key(site_weights),
+        float(strength),
+    )
+    cached_logits = cache.get_intervention_logits(cache_key)
+    if cached_logits is not None:
+        context = str(log_context) if log_context is not None else f"target_var={bank.target_var}"
+        log_progress(
+            "CLT intervention cache hit "
+            f"split={bank.split} {context} examples={bank.size} sites={len(site_weights)} "
+            f"strength={float(strength):g}"
+        )
+        return cached_logits
     outputs = []
     start = perf_counter()
     site_labels = [site.label for site in site_weights]
@@ -287,7 +328,9 @@ def run_clt_site_intervention(
         f"{context} examples={len(outputs)} sites={len(site_weights)} "
         f"elapsed={perf_counter() - start:.1f}s"
     )
-    return torch.stack(outputs, dim=0)
+    logits = torch.stack(outputs, dim=0)
+    cache.set_intervention_logits(cache_key, logits)
+    return logits
 
 
 def collect_clt_site_signatures(
