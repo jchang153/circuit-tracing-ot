@@ -148,15 +148,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=32,
         help="Prompt batch size for plain-HF factual filtering.",
     )
-    parser.add_argument(
-        "--filter-backend",
-        default="hf",
-        choices=("hf", "replacement"),
-        help=(
-            "Model used for factual base/source filtering. Use 'replacement' for exact "
-            "CLT PLOT semantics; 'hf' is faster but filters with plain Gemma."
-        ),
-    )
     parser.add_argument("--skip-stage-b", action="store_true")
     parser.add_argument(
         "--skip-stage-a-holdout",
@@ -319,29 +310,6 @@ def predicted_token_ids_hf(
     return predictions
 
 
-def last_token_logits_replacement(logits: torch.Tensor) -> torch.Tensor:
-    if logits.ndim == 3:
-        return logits.squeeze(0)[-1].detach().cpu()
-    if logits.ndim == 2:
-        return logits[-1].detach().cpu()
-    raise ValueError(f"Unexpected ReplacementModel logits shape: {tuple(logits.shape)}")
-
-
-def predicted_token_ids_replacement(
-    *,
-    model,
-    prompts: list[str],
-) -> list[int]:
-    predictions: list[int] = []
-    for index, prompt in enumerate(prompts):
-        if index == 0 or index == len(prompts) - 1 or (index + 1) % 50 == 0:
-            log_progress(f"ReplacementModel filtering prompt={index + 1}/{len(prompts)}")
-        with torch.inference_mode():
-            logits, _payload = model.feature_intervention(str(prompt), [])
-        predictions.append(int(last_token_logits_replacement(logits).argmax(dim=-1).item()))
-    return predictions
-
-
 def encode_symbol_variants(symbol: str, tokenizer) -> set[int]:
     variants = set()
     for candidate in (" " + str(symbol).strip(), str(symbol).strip()):
@@ -407,60 +375,6 @@ def filter_correct_examples_with_hf_model(
                 kept.append(row)
         filtered[dataset_name] = kept
         log_progress(f"filtered {dataset_name}: kept={len(kept)}/{len(rows)}")
-    return filtered
-
-
-def filter_correct_examples_with_replacement_model(
-    *,
-    model,
-    tokenizer,
-    causal_model: MCQACausalModel,
-    datasets_by_name: dict[str, list[dict[str, object]]],
-) -> dict[str, list[dict[str, object]]]:
-    """Original factual filtering, using the same ReplacementModel later intervened on."""
-    filtered: dict[str, list[dict[str, object]]] = {}
-    for dataset_name, rows in datasets_by_name.items():
-        kept = []
-        log_progress(f"filtering {dataset_name} rows={len(rows)} backend=replacement")
-        base_inputs = [row["input"] for row in rows]
-        source_inputs = [row["counterfactual_inputs"][0] for row in rows]
-        base_expected_answers = [
-            str(causal_model.run_forward(base_input)["raw_output"]).strip()
-            for base_input in base_inputs
-        ]
-        source_expected_answers = [
-            str(causal_model.run_forward(source_input)["raw_output"]).strip()
-            for source_input in source_inputs
-        ]
-        base_expected_variants = [
-            encode_symbol_variants(expected, tokenizer) for expected in base_expected_answers
-        ]
-        source_expected_variants = [
-            encode_symbol_variants(expected, tokenizer) for expected in source_expected_answers
-        ]
-        base_predictions = predicted_token_ids_replacement(
-            model=model,
-            prompts=[str(base_input["raw_input"]) for base_input in base_inputs],
-        )
-        source_predictions = predicted_token_ids_replacement(
-            model=model,
-            prompts=[str(source_input["raw_input"]) for source_input in source_inputs],
-        )
-        for row, base_predicted, source_predicted, base_variants, source_variants in zip(
-            rows,
-            base_predictions,
-            source_predictions,
-            base_expected_variants,
-            source_expected_variants,
-            strict=True,
-        ):
-            if (
-                int(base_predicted) in base_variants
-                and int(source_predicted) in source_variants
-            ):
-                kept.append(row)
-        filtered[dataset_name] = kept
-        log_progress(f"filtered {dataset_name}: kept={len(kept)}/{len(rows)} backend=replacement")
     return filtered
 
 
@@ -736,33 +650,13 @@ def main() -> None:
     stage_a_methods = tuple(parse_csv_strings(args.stage_a_transport_methods) or ("uot",))
     stage_a_layer_features = parse_stage_a_layer_features(args.stage_a_layer_features)
     transcoder_set = resolve_transcoder_set(args.transcoder_set, args.transcoder_size)
-    model = None
 
-    if args.filter_backend == "replacement":
-        from circuit_tracing_ot.model import load_replacement_model
-
-        log_progress(
-            f"loading ReplacementModel for filtering model={args.model_name} "
-            f"transcoder_set={transcoder_set}"
-        )
-        model = load_replacement_model(
-            model_name=args.model_name,
-            transcoder_set=transcoder_set,
-            dtype_name=args.dtype,
-            offload=args.offload,
-            backend=args.backend,
-        )
-        tokenizer = model.tokenizer
-        if getattr(tokenizer, "pad_token", None) is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.padding_side = "left"
-    else:
-        log_progress(f"loading HF filter model model={args.model_name}")
-        filter_model, tokenizer = load_filter_model_and_tokenizer(
-            model_name=args.model_name,
-            dtype_name=args.dtype,
-            hf_token=args.hf_token,
-        )
+    log_progress(f"loading HF filter model model={args.model_name}")
+    filter_model, tokenizer = load_filter_model_and_tokenizer(
+        model_name=args.model_name,
+        dtype_name=args.dtype,
+        hf_token=args.hf_token,
+    )
     causal_model = MCQACausalModel()
     token_positions = get_token_positions(tokenizer, causal_model)
     token_position_ids = tuple(token_position.id for token_position in token_positions)
@@ -776,23 +670,15 @@ def main() -> None:
         dataset_config=args.dataset_config or None,
         hf_token=args.hf_token,
     )
-    if args.filter_backend == "replacement":
-        filtered_datasets = filter_correct_examples_with_replacement_model(
-            model=model,
-            tokenizer=tokenizer,
-            causal_model=causal_model,
-            datasets_by_name=public_datasets,
-        )
-    else:
-        filtered_datasets = filter_correct_examples_with_hf_model(
-            model=filter_model,
-            tokenizer=tokenizer,
-            causal_model=causal_model,
-            datasets_by_name=public_datasets,
-            batch_size=int(args.filter_batch_size),
-        )
-        del filter_model
-        torch.cuda.empty_cache()
+    filtered_datasets = filter_correct_examples_with_hf_model(
+        model=filter_model,
+        tokenizer=tokenizer,
+        causal_model=causal_model,
+        datasets_by_name=public_datasets,
+        batch_size=int(args.filter_batch_size),
+    )
+    del filter_model
+    torch.cuda.empty_cache()
     log_progress(
         "filtered dataset counts "
         + ", ".join(f"{name}={len(rows)}" for name, rows in sorted(filtered_datasets.items()))
@@ -818,17 +704,16 @@ def main() -> None:
         )
     )
 
-    if model is None:
-        from circuit_tracing_ot.model import load_replacement_model
+    from circuit_tracing_ot.model import load_replacement_model
 
-        log_progress(f"loading ReplacementModel model={args.model_name} transcoder_set={transcoder_set}")
-        model = load_replacement_model(
-            model_name=args.model_name,
-            transcoder_set=transcoder_set,
-            dtype_name=args.dtype,
-            offload=args.offload,
-            backend=args.backend,
-        )
+    log_progress(f"loading ReplacementModel model={args.model_name} transcoder_set={transcoder_set}")
+    model = load_replacement_model(
+        model_name=args.model_name,
+        transcoder_set=transcoder_set,
+        dtype_name=args.dtype,
+        offload=args.offload,
+        backend=args.backend,
+    )
     if getattr(model.tokenizer, "pad_token", None) is None:
         model.tokenizer.pad_token = model.tokenizer.eos_token
     model.tokenizer.padding_side = "left"
