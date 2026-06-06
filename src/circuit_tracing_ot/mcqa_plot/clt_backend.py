@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any
+from typing import Any, Callable
 
 import torch
 
@@ -341,8 +341,11 @@ def collect_clt_site_signatures(
     base_logits: torch.Tensor,
     signature_mode: str,
     cache: CLTActivationCache,
+    existing_signatures: dict[str, torch.Tensor] | None = None,
+    on_site_signature: Callable[[CLTSite, torch.Tensor], None] | None = None,
 ) -> torch.Tensor:
     signatures = []
+    existing_signatures = existing_signatures or {}
     start = perf_counter()
     log_progress(
         "collecting CLT site signatures start "
@@ -350,6 +353,13 @@ def collect_clt_site_signatures(
         f"signature_mode={signature_mode}"
     )
     for site_index, site in enumerate(sites):
+        if site.label in existing_signatures:
+            signatures.append(existing_signatures[site.label])
+            log_progress(
+                "reusing cached CLT site signature "
+                f"site={site_index + 1}/{len(sites)} label={site.label}"
+            )
+            continue
         if _should_log_progress(site_index, len(sites), interval=1 if len(sites) <= 10 else 5):
             log_progress(
                 "collecting CLT site signature "
@@ -364,14 +374,15 @@ def collect_clt_site_signatures(
             cache=cache,
             log_context="site_signature",
         )
-        signatures.append(
-            signature_from_logits(
-                counterfactual_logits=site_logits,
-                base_logits=base_logits,
-                bank=bank,
-                signature_mode=signature_mode,
-            )
+        signature = signature_from_logits(
+            counterfactual_logits=site_logits,
+            base_logits=base_logits,
+            bank=bank,
+            signature_mode=signature_mode,
         )
+        signatures.append(signature)
+        if on_site_signature is not None:
+            on_site_signature(site, signature)
     log_progress(
         "collecting CLT site signatures complete "
         f"sites={len(signatures)} elapsed={perf_counter() - start:.1f}s"

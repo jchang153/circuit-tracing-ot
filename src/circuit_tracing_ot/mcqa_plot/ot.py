@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from time import perf_counter
 
 import numpy as np
@@ -286,16 +287,85 @@ def prepare_alignment_artifacts_clt(
     sites: list[CLTSite],
     config: OTConfig,
     cache: CLTActivationCache,
+    checkpoint_path: Path | None = None,
+    checkpoint_metadata: dict[str, object] | None = None,
 ) -> dict[str, object]:
     start = perf_counter()
     reference_target_var = str(next(iter(fit_banks_by_var)))
     reference_bank = fit_banks_by_var[reference_target_var]
+    site_labels = [site.label for site in sites]
+    checkpoint_signatures: dict[str, torch.Tensor] = {}
+    shared_base_logits = None
+    metadata = {
+        "kind": "mcqa_plot_clt_stage_a_signatures",
+        "reference_target_var": reference_target_var,
+        "signature_mode": str(config.signature_mode),
+        "site_labels": site_labels,
+        **(checkpoint_metadata or {}),
+    }
+    if checkpoint_path is not None and checkpoint_path.exists():
+        try:
+            loaded = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+            if isinstance(loaded, dict) and loaded.get("metadata") == metadata:
+                raw_signatures = loaded.get("site_signatures_by_label", {})
+                if isinstance(raw_signatures, dict):
+                    checkpoint_signatures = {
+                        str(label): tensor
+                        for label, tensor in raw_signatures.items()
+                        if isinstance(tensor, torch.Tensor)
+                    }
+                if isinstance(loaded.get("base_logits"), torch.Tensor):
+                    shared_base_logits = loaded["base_logits"]
+                log_progress(
+                    "loaded Stage A signature checkpoint "
+                    f"path={checkpoint_path} completed_sites={len(checkpoint_signatures)}/{len(sites)} "
+                    f"has_base_logits={shared_base_logits is not None}"
+                )
+            else:
+                log_progress(f"ignoring stale Stage A signature checkpoint path={checkpoint_path}")
+        except Exception as exc:
+            log_progress(
+                "failed to load Stage A signature checkpoint; recomputing "
+                f"path={checkpoint_path} error={type(exc).__name__}: {exc}"
+            )
+
+    def save_checkpoint() -> None:
+        if checkpoint_path is None:
+            return
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".tmp")
+        torch.save(
+            {
+                "metadata": metadata,
+                "base_logits": shared_base_logits,
+                "site_signatures_by_label": checkpoint_signatures,
+            },
+            tmp_path,
+        )
+        tmp_path.replace(checkpoint_path)
+
     log_progress(
         "CLT OT prep shared site signatures "
         f"reference_bank={reference_target_var} "
         f"examples={reference_bank.size} sites={len(sites)}"
     )
-    shared_base_logits = collect_base_logits_clt(model=model, bank=reference_bank)
+    if shared_base_logits is None:
+        shared_base_logits = collect_base_logits_clt(model=model, bank=reference_bank)
+        save_checkpoint()
+        if checkpoint_path is not None:
+            log_progress(f"saved Stage A base-logit checkpoint path={checkpoint_path}")
+    else:
+        log_progress(f"reusing cached Stage A base logits examples={shared_base_logits.shape[0]}")
+
+    def on_site_signature(site: CLTSite, signature: torch.Tensor) -> None:
+        checkpoint_signatures[site.label] = signature.detach().cpu()
+        save_checkpoint()
+        if checkpoint_path is not None:
+            log_progress(
+                "saved Stage A site-signature checkpoint "
+                f"path={checkpoint_path} completed_sites={len(checkpoint_signatures)}/{len(sites)}"
+            )
+
     shared_site_signatures = collect_clt_site_signatures(
         model=model,
         bank=reference_bank,
@@ -303,11 +373,21 @@ def prepare_alignment_artifacts_clt(
         base_logits=shared_base_logits,
         signature_mode=config.signature_mode,
         cache=cache,
+        existing_signatures=checkpoint_signatures,
+        on_site_signature=on_site_signature,
     )
+    if checkpoint_path is not None:
+        checkpoint_signatures = {
+            site.label: shared_site_signatures[index].detach().cpu()
+            for index, site in enumerate(sites)
+        }
+        save_checkpoint()
+        log_progress(f"saved complete Stage A signature checkpoint path={checkpoint_path}")
     return {
         "base_logits_by_var": {str(target_var): shared_base_logits for target_var in fit_banks_by_var},
         "site_signatures": shared_site_signatures,
         "prepare_runtime_seconds": float(perf_counter() - start),
+        "signature_checkpoint_path": None if checkpoint_path is None else str(checkpoint_path),
     }
 
 

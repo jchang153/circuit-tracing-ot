@@ -675,12 +675,36 @@ def main() -> None:
         source_target_vars=target_vars,
         calibration_family_weights=calibration_family_weights,
     )
+    reference_train_bank = banks_by_split["train"][target_vars[0]]
+    stage_a_checkpoint_metadata = {
+        "model_name": str(args.model_name),
+        "transcoder_set": str(transcoder_set),
+        "transcoder_size": str(args.transcoder_size),
+        "dtype": str(args.dtype),
+        "dataset_path": str(args.dataset_path),
+        "dataset_config": None if args.dataset_config is None else str(args.dataset_config),
+        "dataset_size": int(args.dataset_size),
+        "split_seed": int(args.split_seed),
+        "train_pool_size": int(args.train_pool_size),
+        "target_vars": list(target_vars),
+        "counterfactual_names": list(counterfactual_names),
+        "token_position_id": str(args.token_position_id),
+        "stage_a_layer_features": "all"
+        if stage_a_layer_features is None
+        else int(stage_a_layer_features),
+        "train_base_prompts": [str(item["raw_input"]) for item in reference_train_bank.base_inputs],
+        "train_source_prompts": [str(item["raw_input"]) for item in reference_train_bank.source_inputs],
+        "train_counterfactual_families": list(reference_train_bank.counterfactual_family_names),
+    }
+    stage_a_checkpoint_path = output_dir / "stage_a_signature_checkpoint.pt"
     prepared_stage_a = prepare_alignment_artifacts_clt(
         model=model,
         fit_banks_by_var={target_var: banks_by_split["train"][target_var] for target_var in target_vars},
         sites=layer_sites,
         config=stage_a_config,
         cache=cache,
+        checkpoint_path=stage_a_checkpoint_path,
+        checkpoint_metadata=stage_a_checkpoint_metadata,
     )
     log_progress(
         "Stage A prepared signatures "
