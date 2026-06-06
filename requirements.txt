@@ -1,0 +1,17 @@
+# Runtime dependencies for circuit-tracing-ot.
+#
+# On Delta/GPU nodes, install CUDA PyTorch first if needed:
+#   pip install --index-url https://download.pytorch.org/whl/cu126 torch torchvision torchaudio
+#
+# Then install this file:
+#   pip install -r requirements.txt
+
+circuit-tracer>=0.1.0
+torch
+transformers
+accelerate
+datasets
+huggingface-hub
+pyyaml
+pandas
+numpy
