@@ -149,6 +149,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Prompt batch size for plain-HF factual filtering.",
     )
     parser.add_argument("--skip-stage-b", action="store_true")
+    parser.add_argument(
+        "--skip-stage-a-holdout",
+        action="store_true",
+        help="Skip Stage A evaluation on the test split after calibration selection.",
+    )
     return parser
 
 
@@ -885,16 +890,20 @@ def main() -> None:
                 for record in ranking[: min(5, len(ranking))]
             )
         )
-    log_progress("Stage A holdout evaluation start")
-    stage_a_holdout = evaluate_stage_a_holdout(
-        model=model,
-        tokenizer=tokenizer,
-        banks_by_split=banks_by_split,
-        sites=layer_sites,
-        selected_config=selected_stage_a,
-        cache=cache,
-    )
-    log_progress("Stage A holdout evaluation complete")
+    if args.skip_stage_a_holdout:
+        stage_a_holdout = {}
+        log_progress("Stage A holdout evaluation skipped")
+    else:
+        log_progress("Stage A holdout evaluation start")
+        stage_a_holdout = evaluate_stage_a_holdout(
+            model=model,
+            tokenizer=tokenizer,
+            banks_by_split=banks_by_split,
+            sites=layer_sites,
+            selected_config=selected_stage_a,
+            cache=cache,
+        )
+        log_progress("Stage A holdout evaluation complete")
     selected_layers = sorted(
         {
             int(record["layer"])
