@@ -157,6 +157,65 @@ def write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def write_json_atomic(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def stage_a_config_key(method: str, epsilon: float, beta_neural: float | None) -> str:
+    beta_text = "none" if beta_neural is None else f"{float(beta_neural):.12g}"
+    return f"method={method}|epsilon={float(epsilon):.12g}|beta={beta_text}"
+
+
+def load_stage_a_config_checkpoint(
+    *,
+    path: Path,
+    metadata: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log_progress(
+            "failed to load Stage A config checkpoint; recomputing configs "
+            f"path={path} error={type(exc).__name__}: {exc}"
+        )
+        return {}
+    if not isinstance(payload, dict) or payload.get("metadata") != metadata:
+        log_progress(f"ignoring stale Stage A config checkpoint path={path}")
+        return {}
+    payloads_by_key = payload.get("payloads_by_key", {})
+    if not isinstance(payloads_by_key, dict):
+        return {}
+    log_progress(
+        "loaded Stage A config checkpoint "
+        f"path={path} completed_configs={len(payloads_by_key)}"
+    )
+    return {
+        str(key): value
+        for key, value in payloads_by_key.items()
+        if isinstance(value, dict)
+    }
+
+
+def save_stage_a_config_checkpoint(
+    *,
+    path: Path,
+    metadata: dict[str, object],
+    payloads_by_key: dict[str, dict[str, object]],
+) -> None:
+    write_json_atomic(
+        path,
+        {
+            "metadata": metadata,
+            "payloads_by_key": payloads_by_key,
+        },
+    )
+
+
 def load_filter_model_and_tokenizer(
     *,
     model_name: str,
@@ -711,43 +770,104 @@ def main() -> None:
         f"sites={len(layer_sites)} runtime={float(prepared_stage_a.get('prepare_runtime_seconds', 0.0)):.1f}s"
     )
 
-    stage_a_payloads = []
+    stage_a_config_plan = []
     for method in stage_a_methods:
         if method not in {"ot", "uot"}:
             raise ValueError(f"Unsupported Stage A method {method}")
         for epsilon in ot_epsilons:
             betas = (None,) if method == "ot" else beta_neurals
             for beta in betas:
-                config_index = len(stage_a_payloads) + 1
-                total_configs = sum(
-                    len(ot_epsilons) * (1 if candidate_method == "ot" else len(beta_neurals))
-                    for candidate_method in stage_a_methods
-                )
-                log_progress(
-                    f"Stage A config {config_index}/{total_configs} "
-                    f"method={method} epsilon={epsilon} beta={beta} sites={len(layer_sites)}"
-                )
-                payload = run_stage_a_config(
-                    model=model,
-                    tokenizer=tokenizer,
-                    banks_by_split=banks_by_split,
-                    sites=layer_sites,
-                    prepared_artifacts=prepared_stage_a,
-                    method=method,
-                    epsilon=float(epsilon),
-                    beta_neural=beta,
-                    signature_mode=str(args.signature_mode),
-                    row_top_k=int(args.stage_a_row_top_k),
-                    calibration_family_weights=calibration_family_weights,
-                    cache=cache,
-                )
-                stage_a_payloads.append(payload)
-                log_progress(
-                    "Stage A config complete "
-                    f"method={method} epsilon={epsilon} beta={beta} "
-                    f"mean_score={float(payload['mean_calibration_score']):.4f} "
-                    f"mean_exact={float(payload['mean_calibration_exact_acc']):.4f}"
-                )
+                stage_a_config_plan.append((str(method), float(epsilon), None if beta is None else float(beta)))
+    stage_a_config_checkpoint_path = output_dir / "stage_a_config_payloads.json"
+    stage_a_config_checkpoint_metadata = {
+        "kind": "mcqa_plot_clt_stage_a_config_payloads",
+        "model_name": str(args.model_name),
+        "transcoder_set": str(transcoder_set),
+        "dataset_path": str(args.dataset_path),
+        "dataset_config": None if args.dataset_config is None else str(args.dataset_config),
+        "dataset_size": int(args.dataset_size),
+        "split_seed": int(args.split_seed),
+        "train_pool_size": int(args.train_pool_size),
+        "calibration_pool_size": int(args.calibration_pool_size),
+        "target_vars": list(target_vars),
+        "counterfactual_names": list(counterfactual_names),
+        "signature_mode": str(args.signature_mode),
+        "calibration_family_weights": [float(weight) for weight in calibration_family_weights],
+        "stage_a_row_top_k": int(args.stage_a_row_top_k),
+        "stage_a_layer_features": "all"
+        if stage_a_layer_features is None
+        else int(stage_a_layer_features),
+        "stage_a_sites": [site.label for site in layer_sites],
+        "config_keys": [
+            stage_a_config_key(method, epsilon, beta)
+            for method, epsilon, beta in stage_a_config_plan
+        ],
+        "calibration_base_prompts": {
+            target_var: [
+                str(item["raw_input"])
+                for item in banks_by_split["calibration"][target_var].base_inputs
+            ]
+            for target_var in target_vars
+        },
+        "calibration_source_prompts": {
+            target_var: [
+                str(item["raw_input"])
+                for item in banks_by_split["calibration"][target_var].source_inputs
+            ]
+            for target_var in target_vars
+        },
+    }
+    stage_a_payloads_by_key = load_stage_a_config_checkpoint(
+        path=stage_a_config_checkpoint_path,
+        metadata=stage_a_config_checkpoint_metadata,
+    )
+    stage_a_payloads = []
+    total_configs = len(stage_a_config_plan)
+    for config_index, (method, epsilon, beta) in enumerate(stage_a_config_plan, start=1):
+        config_key = stage_a_config_key(method, epsilon, beta)
+        if config_key in stage_a_payloads_by_key:
+            payload = stage_a_payloads_by_key[config_key]
+            stage_a_payloads.append(payload)
+            log_progress(
+                f"Stage A config {config_index}/{total_configs} cache hit "
+                f"method={method} epsilon={epsilon} beta={beta}"
+            )
+            continue
+        log_progress(
+            f"Stage A config {config_index}/{total_configs} "
+            f"method={method} epsilon={epsilon} beta={beta} sites={len(layer_sites)}"
+        )
+        payload = run_stage_a_config(
+            model=model,
+            tokenizer=tokenizer,
+            banks_by_split=banks_by_split,
+            sites=layer_sites,
+            prepared_artifacts=prepared_stage_a,
+            method=method,
+            epsilon=float(epsilon),
+            beta_neural=beta,
+            signature_mode=str(args.signature_mode),
+            row_top_k=int(args.stage_a_row_top_k),
+            calibration_family_weights=calibration_family_weights,
+            cache=cache,
+        )
+        stage_a_payloads.append(payload)
+        stage_a_payloads_by_key[config_key] = payload
+        save_stage_a_config_checkpoint(
+            path=stage_a_config_checkpoint_path,
+            metadata=stage_a_config_checkpoint_metadata,
+            payloads_by_key=stage_a_payloads_by_key,
+        )
+        log_progress(
+            "Stage A config checkpoint saved "
+            f"path={stage_a_config_checkpoint_path} completed_configs={len(stage_a_payloads_by_key)}/{total_configs}"
+        )
+        log_progress(
+            "Stage A config complete "
+            f"method={method} epsilon={epsilon} beta={beta} "
+            f"mean_score={float(payload['mean_calibration_score']):.4f} "
+            f"mean_exact={float(payload['mean_calibration_exact_acc']):.4f}"
+        )
     selected_stage_a = max(
         stage_a_payloads,
         key=lambda payload: (
