@@ -113,7 +113,7 @@ def _decoder_vector(
 
 def _add_deltas_hook(
     activations: torch.Tensor,
-    _hook,
+    hook=None,
     *,
     deltas_by_position: dict[int, torch.Tensor],
 ) -> torch.Tensor:
