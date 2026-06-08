@@ -20,6 +20,7 @@ class PrunedGraphCLTSite:
     node_id: str
     layer: int
     feature_idx: int
+    graph_feature_id: int
     ctx_idx: int
     reverse_ctx_idx: int
     influence: float
@@ -55,6 +56,15 @@ def _node_int(node: dict[str, object], key: str) -> int:
     return int(value)
 
 
+def _parse_local_site_from_node_id(node: dict[str, object]) -> tuple[int, int, int]:
+    node_id = str(node.get("node_id", ""))
+    parts = node_id.split("_")
+    if len(parts) != 3:
+        raise ValueError(f"Expected CLT node_id to look like layer_feature_ctx, got {node_id!r}")
+    layer, feature_idx, ctx_idx = (int(part) for part in parts)
+    return layer, feature_idx, ctx_idx
+
+
 def load_pruned_last_token_clt_sites(
     graph_json: Path,
     *,
@@ -85,11 +95,20 @@ def load_pruned_last_token_clt_sites(
         reverse_ctx_idx = _node_int(node, "reverse_ctx_idx")
         if reverse_ctx_idx != 0:
             continue
+        layer, feature_idx, ctx_idx = _parse_local_site_from_node_id(node)
+        graph_layer = _node_int(node, "layer")
+        graph_ctx_idx = _node_int(node, "ctx_idx")
+        if graph_layer != layer or graph_ctx_idx != ctx_idx:
+            raise ValueError(
+                "Pruned graph node has inconsistent layer/ctx fields: "
+                f"node_id={node.get('node_id')} layer={node.get('layer')} ctx_idx={node.get('ctx_idx')}"
+            )
         site = PrunedGraphCLTSite(
             node_id=str(node.get("node_id", "")),
-            layer=_node_int(node, "layer"),
-            feature_idx=_node_int(node, "feature"),
-            ctx_idx=_node_int(node, "ctx_idx"),
+            layer=layer,
+            feature_idx=feature_idx,
+            graph_feature_id=_node_int(node, "feature"),
+            ctx_idx=ctx_idx,
             reverse_ctx_idx=reverse_ctx_idx,
             influence=_node_float(node, "influence"),
             activation=_node_float(node, "activation"),
