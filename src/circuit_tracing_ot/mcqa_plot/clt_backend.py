@@ -31,14 +31,20 @@ class CLTSite:
     token_position_id: str
     feature_idx: int | None = None
     top_features: int | None = None
+    write_layer: int | None = None
+
+    @property
+    def resolved_write_layer(self) -> int:
+        return int(self.layer if self.write_layer is None else self.write_layer)
 
     @property
     def label(self) -> str:
+        layer_text = f"CLT-L{int(self.layer)}->L{self.resolved_write_layer}"
         if self.feature_idx is None:
             if self.top_features is None:
-                return f"CLT-L{int(self.layer)}:{self.token_position_id}:all"
-            return f"CLT-L{int(self.layer)}:{self.token_position_id}:top{int(self.top_features)}"
-        return f"CLT-L{int(self.layer)}:{self.token_position_id}:f{int(self.feature_idx)}"
+                return f"{layer_text}:{self.token_position_id}:all"
+            return f"{layer_text}:{self.token_position_id}:top{int(self.top_features)}"
+        return f"{layer_text}:{self.token_position_id}:f{int(self.feature_idx)}"
 
     @property
     def dim_start(self) -> int:
@@ -130,17 +136,30 @@ def enumerate_clt_layer_sites(
     token_position_id: str,
     layers: tuple[int, ...] | None,
     top_features: int | None,
+    write_layer_mode: str = "same",
 ) -> list[CLTSite]:
     layer_ids = tuple(range(int(num_layers))) if layers is None else tuple(int(layer) for layer in layers)
-    return [
-        CLTSite(
-            layer=int(layer),
-            token_position_id=str(token_position_id),
-            feature_idx=None,
-            top_features=None if top_features is None else int(top_features),
-        )
-        for layer in layer_ids
-    ]
+    sites: list[CLTSite] = []
+    for layer in layer_ids:
+        if write_layer_mode == "same":
+            write_layers = (int(layer),)
+        elif write_layer_mode == "all_subsequent":
+            write_layers = tuple(range(int(layer), int(num_layers)))
+        elif write_layer_mode == "strict_subsequent":
+            write_layers = tuple(range(int(layer) + 1, int(num_layers)))
+        else:
+            raise ValueError(f"Unsupported write_layer_mode={write_layer_mode!r}")
+        for write_layer in write_layers:
+            sites.append(
+                CLTSite(
+                    layer=int(layer),
+                    token_position_id=str(token_position_id),
+                    feature_idx=None,
+                    top_features=None if top_features is None else int(top_features),
+                    write_layer=int(write_layer),
+                )
+            )
+    return sites
 
 
 def enumerate_top_clt_feature_sites(
@@ -152,6 +171,7 @@ def enumerate_top_clt_feature_sites(
     top_features_per_layer: int,
     activation_read_top_k: int,
     cache: CLTActivationCache | None = None,
+    write_layer_mode: str = "same",
 ) -> list[CLTSite]:
     """Rank feature candidates by mean absolute source activation on D_train."""
     cache = cache or CLTActivationCache(model)
@@ -191,15 +211,25 @@ def enumerate_top_clt_feature_sites(
             if int(item_layer) == int(layer)
         ]
         layer_items.sort(key=lambda item: (-float(item[1]), int(item[0])))
+        if write_layer_mode == "same":
+            write_layers = (int(layer),)
+        elif write_layer_mode == "all_subsequent":
+            write_layers = tuple(range(int(layer), int(getattr(model.cfg, "n_layers", 26))))
+        elif write_layer_mode == "strict_subsequent":
+            write_layers = tuple(range(int(layer) + 1, int(getattr(model.cfg, "n_layers", 26))))
+        else:
+            raise ValueError(f"Unsupported write_layer_mode={write_layer_mode!r}")
         for feature_idx, _score in layer_items[: int(top_features_per_layer)]:
-            sites.append(
-                CLTSite(
-                    layer=int(layer),
-                    token_position_id=str(token_position_id),
-                    feature_idx=int(feature_idx),
-                    top_features=int(activation_read_top_k),
+            for write_layer in write_layers:
+                sites.append(
+                    CLTSite(
+                        layer=int(layer),
+                        token_position_id=str(token_position_id),
+                        feature_idx=int(feature_idx),
+                        top_features=int(activation_read_top_k),
+                        write_layer=int(write_layer),
+                    )
                 )
-            )
     return sites
 
 
@@ -343,6 +373,7 @@ def collect_clt_site_signatures(
     cache: CLTActivationCache,
     existing_signatures: dict[str, torch.Tensor] | None = None,
     on_site_signature: Callable[[CLTSite, torch.Tensor], None] | None = None,
+    intervention_runner: Callable[..., torch.Tensor] = run_clt_site_intervention,
 ) -> torch.Tensor:
     signatures = []
     existing_signatures = existing_signatures or {}
@@ -366,7 +397,7 @@ def collect_clt_site_signatures(
                 f"site={site_index + 1}/{len(sites)} label={site.label} "
                 f"elapsed={perf_counter() - start:.1f}s"
             )
-        site_logits = run_clt_site_intervention(
+        site_logits = intervention_runner(
             model=model,
             bank=bank,
             site_weights={site: 1.0},

@@ -30,6 +30,7 @@ from plot_mcqa_clt import (
     DEFAULT_SIGNATURE_MODE,
     DEFAULT_TARGET_VARS,
     DEFAULT_UOT_BETA_NEURALS,
+    DEFAULT_CLT_INTERVENTION_MODE,
     evaluate_stage_a_holdout,
     filter_correct_examples_with_hf_model,
     load_filter_model_and_tokenizer,
@@ -61,6 +62,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dtype", default="bf16", choices=("bf16", "fp16", "fp32"))
     parser.add_argument("--offload", default=None, choices=(None, "cpu", "disk"))
     parser.add_argument("--backend", default=None, choices=("nnsight", "transformerlens"))
+    parser.add_argument(
+        "--clt-intervention-mode",
+        default=DEFAULT_CLT_INTERVENTION_MODE,
+        choices=("decoded_mlp", "feature_swap"),
+        help=(
+            "decoded_mlp adds decoded CLT feature deltas into MLP output activations; "
+            "feature_swap uses the old ReplacementModel feature-value intervention path."
+        ),
+    )
     parser.add_argument("--target-vars", default=",".join(DEFAULT_TARGET_VARS))
     parser.add_argument("--counterfactual-names", default=",".join(DEFAULT_COUNTERFACTUAL_NAMES))
     parser.add_argument("--signature-mode", default=DEFAULT_SIGNATURE_MODE)
@@ -102,6 +112,7 @@ def build_stage_a_site_rankings(
                 {
                     "target_var": str(target_var),
                     "layer": int(record["layer"]),
+                    "write_layer": int(record.get("write_layer", record["layer"])),
                     "feature_idx": record.get("feature_idx"),
                     "site_index": int(record["site_index"]),
                     "site_label": str(record["site_label"]),
@@ -238,6 +249,7 @@ def main() -> None:
         signature_mode=str(args.signature_mode),
         source_target_vars=target_vars,
         calibration_family_weights=calibration_family_weights,
+        intervention_mode=str(args.clt_intervention_mode),
     )
     reference_train_bank = banks_by_split["train"][target_vars[0]]
     signature_checkpoint_metadata = {
@@ -256,6 +268,7 @@ def main() -> None:
         "train_pool_size": int(args.train_pool_size),
         "target_vars": list(target_vars),
         "counterfactual_names": list(counterfactual_names),
+        "clt_intervention_mode": str(args.clt_intervention_mode),
         "train_base_prompts": [str(item["raw_input"]) for item in reference_train_bank.base_inputs],
         "train_source_prompts": [str(item["raw_input"]) for item in reference_train_bank.source_inputs],
         "train_counterfactual_families": list(reference_train_bank.counterfactual_family_names),
@@ -302,6 +315,7 @@ def main() -> None:
         "target_vars": list(target_vars),
         "counterfactual_names": list(counterfactual_names),
         "signature_mode": str(args.signature_mode),
+        "clt_intervention_mode": str(args.clt_intervention_mode),
         "calibration_family_weights": [float(weight) for weight in calibration_family_weights],
         "stage_a_row_top_k": int(args.stage_a_row_top_k),
         "stage_a_sites": [site.label for site in graph_sites],
@@ -357,6 +371,7 @@ def main() -> None:
             row_top_k=int(args.stage_a_row_top_k),
             calibration_family_weights=calibration_family_weights,
             cache=cache,
+            intervention_mode=str(args.clt_intervention_mode),
         )
         stage_a_payloads.append(payload)
         stage_a_payloads_by_key[config_key] = payload
@@ -392,6 +407,7 @@ def main() -> None:
             sites=graph_sites,
             selected_config=selected_stage_a,
             cache=cache,
+            intervention_mode=str(args.clt_intervention_mode),
         )
         log_progress("Stage A holdout evaluation complete")
 

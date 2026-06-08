@@ -48,6 +48,8 @@ DEFAULT_CALIBRATION_METRIC = "family_weighted_macro_exact_acc"
 DEFAULT_CALIBRATION_FAMILY_WEIGHTS = (1.0, 1.0, 1.0)
 DEFAULT_OT_EPSILONS = (0.5, 1.0, 2.0, 4.0)
 DEFAULT_UOT_BETA_NEURALS = (0.1, 0.3, 1.0, 3.0)
+DEFAULT_CLT_INTERVENTION_MODE = "decoded_mlp"
+DEFAULT_CLT_WRITE_LAYER_MODE = "same"
 
 
 def parse_csv_ints(value: str | None) -> tuple[int, ...] | None:
@@ -133,6 +135,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--top-layers", type=int, default=4)
     parser.add_argument("--stage-b-feature-candidates-per-layer", type=int, default=128)
     parser.add_argument("--stage-b-activation-read-top-k", type=int, default=512)
+    parser.add_argument(
+        "--clt-intervention-mode",
+        default=DEFAULT_CLT_INTERVENTION_MODE,
+        choices=("decoded_mlp", "feature_swap"),
+        help=(
+            "decoded_mlp adds decoded CLT feature deltas into MLP output activations; "
+            "feature_swap uses the old ReplacementModel feature-value intervention path."
+        ),
+    )
+    parser.add_argument(
+        "--clt-write-layer-mode",
+        default=DEFAULT_CLT_WRITE_LAYER_MODE,
+        choices=("same", "all_subsequent", "strict_subsequent"),
+        help=(
+            "How to enumerate write layers for decoded_mlp sites. "
+            "'same' keeps the existing candidate count; subsequent modes create (source, write) pairs."
+        ),
+    )
     parser.add_argument("--stage-b-top-k-values", default="1,2,4")
     parser.add_argument("--stage-b-lambdas", default="0.5,1.0,2.0,4.0")
     parser.add_argument(
@@ -415,6 +435,7 @@ def run_stage_a_config(
     row_top_k: int,
     calibration_family_weights: tuple[float, ...],
     cache: CLTActivationCache,
+    intervention_mode: str,
 ) -> dict[str, object]:
     target_vars = tuple(canonicalize_target_var(target_var) for target_var in DEFAULT_TARGET_VARS)
     config = OTConfig(
@@ -427,6 +448,7 @@ def run_stage_a_config(
         top_k_values=(1,),
         lambda_values=(1.0,),
         store_prediction_details=False,
+        intervention_mode=str(intervention_mode),
     )
     _variable_signatures, transport, transport_meta = solve_transport_only(
         fit_banks_by_var={target_var: banks_by_split["train"][target_var] for target_var in target_vars},
@@ -467,6 +489,7 @@ def run_stage_a_config(
                 tokenizer=tokenizer,
                 cache=cache,
                 include_details=True,
+                intervention_mode=str(intervention_mode),
             )
             calibration_score = stage_a_calibration_score(
                 result=calibration_result,
@@ -485,6 +508,7 @@ def run_stage_a_config(
                     "site": site,
                     "site_label": site.label,
                     "layer": int(site.layer),
+                    "write_layer": int(site.resolved_write_layer),
                     "feature_idx": site.feature_idx,
                     "transport_mass": float(entry["transport_mass"]),
                     "calibration_score": float(calibration_score),
@@ -517,6 +541,7 @@ def run_stage_a_config(
             "site_index": int(best["site_index"]),
             "site_label": str(best["site_label"]),
             "layer": int(best["layer"]),
+            "write_layer": int(best["write_layer"]),
             "feature_idx": best["feature_idx"],
             "epsilon": float(epsilon),
             "uot_beta_neural": None if beta_neural is None else float(beta_neural),
@@ -536,6 +561,7 @@ def run_stage_a_config(
     return {
         "kind": "mcqa_plot_clt_stage_a_config",
         "method": method,
+        "intervention_mode": str(intervention_mode),
         "epsilon": float(epsilon),
         "uot_beta_neural": None if beta_neural is None else float(beta_neural),
         "transport": transport.tolist(),
@@ -555,6 +581,7 @@ def evaluate_stage_a_holdout(
     sites,
     selected_config: dict[str, object],
     cache: CLTActivationCache,
+    intervention_mode: str,
 ) -> dict[str, object]:
     holdout_records = {}
     for target_var, record in selected_config["per_var_records"].items():
@@ -568,14 +595,16 @@ def evaluate_stage_a_holdout(
             tokenizer=tokenizer,
             cache=cache,
             include_details=True,
+            intervention_mode=str(intervention_mode),
         )
-        holdout_result["method"] = "single_layer_full_swap"
+        holdout_result["method"] = "single_site_intervention"
         holdout_result["selection_score"] = float(record["selection_score"])
         holdout_result["selection_exact_acc"] = float(record["selection_exact_acc"])
         holdout_result["calibration_exact_acc"] = float(record["calibration_exact_acc"])
         holdout_records[target_var] = {
             "selected_site_label": site.label,
             "selected_layer": int(site.layer),
+            "selected_write_layer": int(site.resolved_write_layer),
             "selected_feature_idx": site.feature_idx,
             "ranking": holdout_ranking,
             "results": [holdout_result],
@@ -601,6 +630,7 @@ def build_stage_a_layer_rankings(
             candidate = {
                 "target_var": str(target_var),
                 "layer": int(record["layer"]),
+                "write_layer": int(record.get("write_layer", record["layer"])),
                 "site_index": int(record["site_index"]),
                 "site_label": str(record["site_label"]),
                 "method": method,
@@ -726,10 +756,12 @@ def main() -> None:
         token_position_id=str(args.token_position_id),
         layers=layers,
         top_features=stage_a_layer_features,
+        write_layer_mode=str(args.clt_write_layer_mode),
     )
     log_progress(
         "Stage A layer sites "
         f"count={len(layer_sites)} layers={[int(site.layer) for site in layer_sites]} "
+        f"write_layer_mode={args.clt_write_layer_mode} "
         f"copy_features={'all' if stage_a_layer_features is None else int(stage_a_layer_features)}"
     )
     stage_a_config = OTConfig(
@@ -738,6 +770,7 @@ def main() -> None:
         signature_mode=str(args.signature_mode),
         source_target_vars=target_vars,
         calibration_family_weights=calibration_family_weights,
+        intervention_mode=str(args.clt_intervention_mode),
     )
     reference_train_bank = banks_by_split["train"][target_vars[0]]
     stage_a_checkpoint_metadata = {
@@ -753,6 +786,8 @@ def main() -> None:
         "target_vars": list(target_vars),
         "counterfactual_names": list(counterfactual_names),
         "token_position_id": str(args.token_position_id),
+        "clt_intervention_mode": str(args.clt_intervention_mode),
+        "clt_write_layer_mode": str(args.clt_write_layer_mode),
         "stage_a_layer_features": "all"
         if stage_a_layer_features is None
         else int(stage_a_layer_features),
@@ -797,6 +832,8 @@ def main() -> None:
         "target_vars": list(target_vars),
         "counterfactual_names": list(counterfactual_names),
         "signature_mode": str(args.signature_mode),
+        "clt_intervention_mode": str(args.clt_intervention_mode),
+        "clt_write_layer_mode": str(args.clt_write_layer_mode),
         "calibration_family_weights": [float(weight) for weight in calibration_family_weights],
         "stage_a_row_top_k": int(args.stage_a_row_top_k),
         "stage_a_layer_features": "all"
@@ -855,6 +892,7 @@ def main() -> None:
             row_top_k=int(args.stage_a_row_top_k),
             calibration_family_weights=calibration_family_weights,
             cache=cache,
+            intervention_mode=str(args.clt_intervention_mode),
         )
         stage_a_payloads.append(payload)
         stage_a_payloads_by_key[config_key] = payload
@@ -902,6 +940,7 @@ def main() -> None:
             sites=layer_sites,
             selected_config=selected_stage_a,
             cache=cache,
+            intervention_mode=str(args.clt_intervention_mode),
         )
         log_progress("Stage A holdout evaluation complete")
     selected_layers = sorted(
@@ -923,6 +962,7 @@ def main() -> None:
                 top_features_per_layer=int(args.stage_b_feature_candidates_per_layer),
                 activation_read_top_k=int(args.stage_b_activation_read_top_k),
                 cache=cache,
+                write_layer_mode=str(args.clt_write_layer_mode),
             )
             if not feature_sites:
                 continue
@@ -951,6 +991,7 @@ def main() -> None:
                         calibration_metric=DEFAULT_CALIBRATION_METRIC,
                         calibration_family_weights=calibration_family_weights,
                         store_prediction_details=True,
+                        intervention_mode=str(args.clt_intervention_mode),
                     )
                     payload = run_alignment_pipeline_clt(
                         model=model,

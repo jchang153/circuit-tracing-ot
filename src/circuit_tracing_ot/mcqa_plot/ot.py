@@ -17,6 +17,7 @@ from .clt_backend import (
     run_clt_site_intervention,
 )
 from .data import COUNTERFACTUAL_FAMILIES, MCQAPairBank, canonicalize_target_var
+from .decoded_interventions import run_clt_decoded_site_intervention
 from ..logging import log_progress
 from .metrics import (
     build_variable_signature,
@@ -39,6 +40,15 @@ class OTConfig:
     calibration_metric: str = "family_weighted_macro_exact_acc"
     calibration_family_weights: tuple[float, ...] = (1.0, 1.0, 1.0)
     store_prediction_details: bool = True
+    intervention_mode: str = "decoded_mlp"
+
+
+def intervention_runner_for_mode(intervention_mode: str):
+    if intervention_mode == "decoded_mlp":
+        return run_clt_decoded_site_intervention
+    if intervention_mode == "feature_swap":
+        return run_clt_site_intervention
+    raise ValueError(f"Unsupported CLT intervention mode {intervention_mode!r}")
 
 
 def _squared_euclidean_cost(u_points: torch.Tensor, v_points: torch.Tensor) -> torch.Tensor:
@@ -253,6 +263,7 @@ def build_rankings(
             "site_index": int(site_index),
             "site_label": sites[int(site_index)].label,
             "layer": int(sites[int(site_index)].layer),
+            "write_layer": int(sites[int(site_index)].resolved_write_layer),
             "token_position_id": str(sites[int(site_index)].token_position_id),
             "dim_start": int(sites[int(site_index)].dim_start),
             "dim_end": int(sites[int(site_index)].dim_end),
@@ -270,6 +281,7 @@ def _site_ranking_record(site: CLTSite, *, site_index: int, target_var: str) -> 
         "site_index": int(site_index),
         "site_label": site.label,
         "layer": int(site.layer),
+        "write_layer": int(site.resolved_write_layer),
         "token_position_id": str(site.token_position_id),
         "dim_start": int(site.dim_start),
         "dim_end": int(site.dim_end),
@@ -300,6 +312,7 @@ def prepare_alignment_artifacts_clt(
         "kind": "mcqa_plot_clt_stage_a_signatures",
         "reference_target_var": reference_target_var,
         "signature_mode": str(config.signature_mode),
+        "intervention_mode": str(config.intervention_mode),
         "site_labels": site_labels,
         **(checkpoint_metadata or {}),
     }
@@ -347,7 +360,8 @@ def prepare_alignment_artifacts_clt(
     log_progress(
         "CLT OT prep shared site signatures "
         f"reference_bank={reference_target_var} "
-        f"examples={reference_bank.size} sites={len(sites)}"
+        f"examples={reference_bank.size} sites={len(sites)} "
+        f"intervention_mode={config.intervention_mode}"
     )
     if shared_base_logits is None:
         shared_base_logits = collect_base_logits_clt(model=model, bank=reference_bank)
@@ -375,6 +389,7 @@ def prepare_alignment_artifacts_clt(
         cache=cache,
         existing_signatures=checkpoint_signatures,
         on_site_signature=on_site_signature,
+        intervention_runner=intervention_runner_for_mode(config.intervention_mode),
     )
     if checkpoint_path is not None:
         checkpoint_signatures = {
@@ -420,6 +435,7 @@ def evaluate_single_site_intervention_clt(
     tokenizer,
     cache: CLTActivationCache,
     include_details: bool,
+    intervention_mode: str = "decoded_mlp",
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     log_progress(
         "evaluating single CLT site "
@@ -427,7 +443,7 @@ def evaluate_single_site_intervention_clt(
         f"site={site.label} examples={bank.size}"
     )
     start = perf_counter()
-    logits = run_clt_site_intervention(
+    logits = intervention_runner_for_mode(intervention_mode)(
         model=model,
         bank=bank,
         site_weights={site: 1.0},
@@ -439,8 +455,10 @@ def evaluate_single_site_intervention_clt(
         "method": "bruteforce",
         "variable": bank.target_var,
         "split": bank.split,
+        "intervention_mode": str(intervention_mode),
         "site_label": site.label,
         "layer": int(site.layer),
+        "write_layer": int(site.resolved_write_layer),
         "token_position_id": str(site.token_position_id),
         "feature_idx": site.feature_idx,
         "top_k": 1,
@@ -471,9 +489,10 @@ def _evaluate_soft_intervention_clt(
     source_target_vars: tuple[str, ...],
     cache: CLTActivationCache,
     include_details: bool,
+    intervention_mode: str = "decoded_mlp",
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     site_weights = _site_weights_from_transport(selected_transport, sites)
-    logits = run_clt_site_intervention(
+    logits = intervention_runner_for_mode(intervention_mode)(
         model=model,
         bank=bank,
         site_weights=site_weights,
@@ -485,6 +504,7 @@ def _evaluate_soft_intervention_clt(
         "method": "soft_transport",
         "variable": bank.target_var,
         "split": bank.split,
+        "intervention_mode": str(intervention_mode),
         "site_label": f"soft:k{int(top_k)},l{float(strength):g}",
         "top_k": int(top_k),
         "lambda": float(strength),
@@ -563,6 +583,7 @@ def select_hyperparameters_clt(
             source_target_vars=source_target_vars,
             cache=cache,
             include_details=False,
+            intervention_mode=config.intervention_mode,
         )
         calibration_score = _calibration_score_from_result(result, config)
         candidate = {
@@ -677,6 +698,7 @@ def run_alignment_pipeline_clt(
         source_target_vars=target_source_target_vars,
         cache=cache,
         include_details=bool(config.store_prediction_details),
+        intervention_mode=config.intervention_mode,
     )
     holdout_seconds = float(perf_counter() - holdout_start)
     selected_calibration_result = dict(selected["result"])
@@ -691,6 +713,7 @@ def run_alignment_pipeline_clt(
         "source_target_vars": list(config.source_target_vars),
         "target_var_row_index": int(target_row_index),
         "signature_mode": config.signature_mode,
+        "intervention_mode": config.intervention_mode,
         "calibration_metric": config.calibration_metric,
         "calibration_family_weights": [float(weight) for weight in config.calibration_family_weights],
         "transport": transport.tolist(),
@@ -714,6 +737,7 @@ def run_alignment_pipeline_clt(
             "top_k": top_k,
             "lambda": strength,
             "signature_mode": config.signature_mode,
+            "intervention_mode": config.intervention_mode,
             "calibration_metric": config.calibration_metric,
         },
         "selected_calibration_result": selected_calibration_result,
@@ -737,6 +761,7 @@ def target_row_ranking(payload: dict[str, object], *, sites: list[CLTSite]) -> l
                 "site_index": int(site_index),
                 "site_label": site.label,
                 "layer": int(site.layer),
+                "write_layer": int(site.resolved_write_layer),
                 "token_position_id": str(site.token_position_id),
                 "feature_idx": site.feature_idx,
                 "transport_mass": float(row_transport[site_index]),
