@@ -228,6 +228,37 @@ the same signature/transport/calibration/test logic, and reports the selected fe
 For Stage A-only analysis, inspect `stage_a.layer_rankings_by_var`: it ranks the best calibrated
 CLT layer sites separately for `answer_pointer` and `answer_token`.
 
+## MCQA PLOT over Pruned Last-Token Graph Features
+
+To test only CLT features that survive Anthropic attribution-graph pruning, run the pruned
+last-token experiment on an exported viewer graph:
+
+```bash
+PYTHONPATH=src python scripts/plot_mcqa_pruned_last_token_clt.py \
+  --graph-json results/delta_default_train_0/default-train-0.json \
+  --candidate-top-k 300 \
+  --candidate-rank-by influence \
+  --dataset-path jchang153/copycolors_mcqa \
+  --dataset-size 2000 \
+  --train-pool-size 100 \
+  --calibration-pool-size 100 \
+  --test-pool-size 100 \
+  --stage-a-transport-methods uot \
+  --ot-epsilons 0.5,1.0,2.0 \
+  --uot-beta-neurals 0.3,1.0 \
+  --stage-a-row-top-k 20
+```
+
+This loader keeps only pruned viewer nodes with `feature_type == "cross layer transcoder"` and
+`reverse_ctx_idx == 0`, deduplicates them by `(layer, feature)`, maps each candidate to a
+`last_token` CLT feature intervention site, and runs the existing OT/UOT causal-abstraction
+localization protocol over those sites. Results are written under:
+
+```text
+results/pruned_last_token_clt_mcqa_plot_pruned_last_token_clt/
+  mcqa_pruned_last_token_clt_results.json
+```
+
 To visualize the PLOT-selected features in the existing circuit-tracer viewer without applying
 additional pruning, first produce an unpruned trace for a representative prompt:
 
