@@ -147,10 +147,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--clt-write-layer-mode",
         default=DEFAULT_CLT_WRITE_LAYER_MODE,
-        choices=("same", "all_subsequent", "strict_subsequent"),
+        choices=("same", "next_layer", "all_subsequent", "strict_subsequent"),
         help=(
             "How to enumerate write layers for decoded_mlp sites. "
-            "'same' keeps the existing candidate count; subsequent modes create (source, write) pairs."
+            "'same' keeps the existing candidate count; 'next_layer' writes k->k+1; "
+            "subsequent modes create broader (source, write) pairs."
         ),
     )
     parser.add_argument("--stage-b-top-k-values", default="1,2,4")

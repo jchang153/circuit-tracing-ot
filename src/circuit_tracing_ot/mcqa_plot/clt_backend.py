@@ -143,6 +143,8 @@ def enumerate_clt_layer_sites(
     for layer in layer_ids:
         if write_layer_mode == "same":
             write_layers = (int(layer),)
+        elif write_layer_mode == "next_layer":
+            write_layers = (int(layer) + 1,) if int(layer) + 1 < int(num_layers) else ()
         elif write_layer_mode == "all_subsequent":
             write_layers = tuple(range(int(layer), int(num_layers)))
         elif write_layer_mode == "strict_subsequent":
@@ -213,6 +215,9 @@ def enumerate_top_clt_feature_sites(
         layer_items.sort(key=lambda item: (-float(item[1]), int(item[0])))
         if write_layer_mode == "same":
             write_layers = (int(layer),)
+        elif write_layer_mode == "next_layer":
+            num_layers = int(getattr(model.cfg, "n_layers", 26))
+            write_layers = (int(layer) + 1,) if int(layer) + 1 < num_layers else ()
         elif write_layer_mode == "all_subsequent":
             write_layers = tuple(range(int(layer), int(getattr(model.cfg, "n_layers", 26))))
         elif write_layer_mode == "strict_subsequent":
