@@ -111,6 +111,51 @@ def build_family_label_signature(
     return normalize_family_label_feature_blocks(aggregated) if normalize_blocks else aggregated
 
 
+def _base_answer_indices(bank: MCQAPairBank) -> torch.Tensor:
+    return torch.tensor(
+        [ALPHABET_LABELS.index(str(output["answer"]).strip()) for output in bank.base_outputs],
+        dtype=torch.long,
+    )
+
+
+def _target_answer_indices(bank: MCQAPairBank) -> torch.Tensor:
+    target_var = canonicalize_target_var(bank.target_var)
+    if target_var == "answer_pointer":
+        source_pointer_indices = torch.tensor(
+            [int(output["answer_pointer"]) for output in bank.source_outputs],
+            dtype=torch.long,
+        )
+        return torch.tensor(
+            [
+                ALPHABET_LABELS.index(str(bank.base_inputs[index][f"symbol{int(pointer)}"]).strip())
+                for index, pointer in enumerate(source_pointer_indices.tolist())
+            ],
+            dtype=torch.long,
+        )
+    if target_var == "answer_token":
+        return torch.tensor(
+            [ALPHABET_LABELS.index(str(output["answer"]).strip()) for output in bank.source_outputs],
+            dtype=torch.long,
+        )
+    raise ValueError(f"Unsupported MCQA target variable {bank.target_var}")
+
+
+def _example_label_delta_signature(bank: MCQAPairBank) -> torch.Tensor:
+    target_onehot = F.one_hot(_target_answer_indices(bank), num_classes=STRUCTURED_LABEL_DIM).to(torch.float32)
+    base_onehot = F.one_hot(_base_answer_indices(bank), num_classes=STRUCTURED_LABEL_DIM).to(torch.float32)
+    return (target_onehot - base_onehot).reshape(-1)
+
+
+def _example_label_logit_delta_signature(
+    *,
+    counterfactual_logits: torch.Tensor,
+    base_logits: torch.Tensor,
+    bank: MCQAPairBank,
+) -> torch.Tensor:
+    delta = _gather_label_logits(counterfactual_logits, bank) - _gather_label_logits(base_logits, bank)
+    return delta.reshape(-1)
+
+
 def gather_variable_logits(logits: torch.Tensor, bank: MCQAPairBank) -> torch.Tensor:
     target_var = canonicalize_target_var(bank.target_var)
     if target_var == "answer_pointer":
@@ -205,101 +250,13 @@ def prediction_details_from_logits(logits: torch.Tensor, bank: MCQAPairBank, tok
 
 
 def build_variable_signature(bank: MCQAPairBank, signature_mode: str) -> torch.Tensor:
-    target_var = canonicalize_target_var(bank.target_var)
-    if signature_mode == "whole_vocab_kl_t1":
-        return bank.changed_mask.to(torch.float32)
-    if signature_mode == "answer_logit_delta":
-        if target_var == "answer_pointer":
-            source_onehot = F.one_hot(bank.labels.to(torch.long), num_classes=4).to(torch.float32)
-            base_indices = torch.tensor(
-                [int(output["answer_pointer"]) for output in bank.base_outputs],
-                dtype=torch.long,
-            )
-            return (source_onehot - F.one_hot(base_indices, num_classes=4).to(torch.float32)).reshape(-1)
-        source_onehot = F.one_hot(bank.labels.to(torch.long), num_classes=26).to(torch.float32)
-        base_indices = torch.tensor(
-            [ALPHABET_LABELS.index(str(output["answer"]).strip()) for output in bank.base_outputs],
-            dtype=torch.long,
-        )
-        return (source_onehot - F.one_hot(base_indices, num_classes=26).to(torch.float32)).reshape(-1)
-    base_pointer_indices = torch.tensor(
-        [int(output["answer_pointer"]) for output in bank.base_outputs],
-        dtype=torch.long,
+    if signature_mode == "example_label_delta":
+        return _example_label_delta_signature(bank)
+    raise ValueError(
+        f"Unsupported signature_mode={signature_mode!r}. "
+        "Use 'example_label_delta' so abstract variables and neural sites share "
+        "the same 26 x N alphabet-label signature space."
     )
-    base_answer_indices = torch.tensor(
-        [ALPHABET_LABELS.index(str(output["answer"]).strip()) for output in bank.base_outputs],
-        dtype=torch.long,
-    )
-    if signature_mode in {"family_slot_label_delta", "family_slot_label_delta_norm"}:
-        slot_delta = torch.zeros((bank.size, STRUCTURED_SLOT_DIM), dtype=torch.float32)
-        label_delta = torch.zeros((bank.size, STRUCTURED_LABEL_DIM), dtype=torch.float32)
-        if target_var == "answer_pointer":
-            source_pointer_indices = torch.tensor(
-                [int(output["answer_pointer"]) for output in bank.source_outputs],
-                dtype=torch.long,
-            )
-            slot_delta = (
-                F.one_hot(source_pointer_indices, num_classes=STRUCTURED_SLOT_DIM).to(torch.float32)
-                - F.one_hot(base_pointer_indices, num_classes=STRUCTURED_SLOT_DIM).to(torch.float32)
-            )
-            target_label_indices = torch.tensor(
-                [
-                    ALPHABET_LABELS.index(str(bank.base_inputs[index][f"symbol{int(pointer)}"]).strip())
-                    for index, pointer in enumerate(source_pointer_indices.tolist())
-                ],
-                dtype=torch.long,
-            )
-            label_delta = (
-                F.one_hot(target_label_indices, num_classes=STRUCTURED_LABEL_DIM).to(torch.float32)
-                - F.one_hot(base_answer_indices, num_classes=STRUCTURED_LABEL_DIM).to(torch.float32)
-            )
-        else:
-            source_answer_indices = torch.tensor(
-                [ALPHABET_LABELS.index(str(output["answer"]).strip()) for output in bank.source_outputs],
-                dtype=torch.long,
-            )
-            label_delta = (
-                F.one_hot(source_answer_indices, num_classes=STRUCTURED_LABEL_DIM).to(torch.float32)
-                - F.one_hot(base_answer_indices, num_classes=STRUCTURED_LABEL_DIM).to(torch.float32)
-            )
-        return build_family_signature(
-            torch.cat((slot_delta, label_delta), dim=1),
-            bank,
-            normalize_blocks=(signature_mode == "family_slot_label_delta_norm"),
-        )
-    if signature_mode in {
-        "family_label_delta",
-        "family_label_delta_norm",
-        "family_label_logit_delta",
-        "family_label_logit_delta_norm",
-    }:
-        if target_var == "answer_pointer":
-            source_pointer_indices = torch.tensor(
-                [int(output["answer_pointer"]) for output in bank.source_outputs],
-                dtype=torch.long,
-            )
-            target_label_indices = torch.tensor(
-                [
-                    ALPHABET_LABELS.index(str(bank.base_inputs[index][f"symbol{int(pointer)}"]).strip())
-                    for index, pointer in enumerate(source_pointer_indices.tolist())
-                ],
-                dtype=torch.long,
-            )
-        else:
-            target_label_indices = torch.tensor(
-                [ALPHABET_LABELS.index(str(output["answer"]).strip()) for output in bank.source_outputs],
-                dtype=torch.long,
-            )
-        label_delta = (
-            F.one_hot(target_label_indices, num_classes=STRUCTURED_LABEL_DIM).to(torch.float32)
-            - F.one_hot(base_answer_indices, num_classes=STRUCTURED_LABEL_DIM).to(torch.float32)
-        )
-        return build_family_label_signature(
-            label_delta,
-            bank,
-            normalize_blocks=signature_mode in {"family_label_delta_norm", "family_label_logit_delta_norm"},
-        )
-    raise ValueError(f"Unsupported signature_mode={signature_mode}")
 
 
 def signature_from_logits(
@@ -309,33 +266,14 @@ def signature_from_logits(
     bank: MCQAPairBank,
     signature_mode: str,
 ) -> torch.Tensor:
-    if signature_mode == "whole_vocab_kl_t1":
-        base_log_probs = torch.log_softmax(base_logits, dim=-1)
-        counterfactual_log_probs = torch.log_softmax(counterfactual_logits, dim=-1)
-        counterfactual_probs = counterfactual_log_probs.exp()
-        return torch.sum(
-            counterfactual_probs * (counterfactual_log_probs - base_log_probs),
-            dim=-1,
-        ).reshape(-1)
-    if signature_mode == "answer_logit_delta":
-        return (gather_variable_logits(counterfactual_logits, bank) - gather_variable_logits(base_logits, bank)).reshape(-1)
-    if signature_mode in {"family_slot_label_delta", "family_slot_label_delta_norm"}:
-        delta = structured_output_features(counterfactual_logits, bank) - structured_output_features(base_logits, bank)
-        return build_family_signature(
-            delta,
-            bank,
-            normalize_blocks=(signature_mode == "family_slot_label_delta_norm"),
+    if signature_mode == "example_label_delta":
+        return _example_label_logit_delta_signature(
+            counterfactual_logits=counterfactual_logits,
+            base_logits=base_logits,
+            bank=bank,
         )
-    if signature_mode in {
-        "family_label_delta",
-        "family_label_delta_norm",
-        "family_label_logit_delta",
-        "family_label_logit_delta_norm",
-    }:
-        delta = _gather_label_logits(counterfactual_logits, bank) - _gather_label_logits(base_logits, bank)
-        return build_family_label_signature(
-            delta,
-            bank,
-            normalize_blocks=signature_mode in {"family_label_delta_norm", "family_label_logit_delta_norm"},
-        )
-    raise ValueError(f"Unsupported signature_mode={signature_mode}")
+    raise ValueError(
+        f"Unsupported signature_mode={signature_mode!r}. "
+        "Use 'example_label_delta' so abstract variables and neural sites share "
+        "the same 26 x N alphabet-label signature space."
+    )

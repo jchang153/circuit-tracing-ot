@@ -43,7 +43,7 @@ from circuit_tracing_ot.mcqa_plot.metrics import build_variable_signature
 DEFAULT_TARGET_VARS = ("answer_pointer", "answer_token")
 DEFAULT_COUNTERFACTUAL_NAMES = ("answerPosition", "randomLetter", "answerPosition_randomLetter")
 DEFAULT_TOKEN_POSITION_ID = "last_token"
-DEFAULT_SIGNATURE_MODE = "family_label_delta_norm"
+DEFAULT_SIGNATURE_MODE = "example_label_delta"
 DEFAULT_CALIBRATION_METRIC = "family_weighted_macro_exact_acc"
 DEFAULT_CALIBRATION_FAMILY_WEIGHTS = (1.0, 1.0, 1.0)
 DEFAULT_OT_EPSILONS = (0.5, 1.0, 2.0, 4.0)

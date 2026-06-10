@@ -193,6 +193,7 @@ python scripts/plot_mcqa_clt.py \
   --test-pool-size 100 \
   --layers 0-25 \
   --token-position-id last_token \
+  --signature-mode example_label_delta \
   --stage-a-transport-methods uot \
   --ot-epsilons 0.5,1.0,2.0,4.0 \
   --uot-beta-neurals 0.1,0.3,1.0,3.0 \
@@ -249,6 +250,7 @@ PYTHONPATH=src python scripts/plot_mcqa_plt.py \
   --test-pool-size 100 \
   --layers 0-25 \
   --token-position-id last_token \
+  --signature-mode example_label_delta \
   --stage-a-transport-methods uot \
   --ot-epsilons 1.0,2.0 \
   --uot-beta-neurals 0.3,1.0 \

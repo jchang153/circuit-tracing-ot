@@ -33,7 +33,7 @@ class OTConfig:
     uot_beta_neural: float = 1.0
     max_iter: int = 500
     tol: float = 1e-9
-    signature_mode: str = "family_label_delta_norm"
+    signature_mode: str = "example_label_delta"
     top_k_values: tuple[int, ...] = (1,)
     lambda_values: tuple[float, ...] = (1.0,)
     source_target_vars: tuple[str, ...] = ("answer_pointer", "answer_token")
