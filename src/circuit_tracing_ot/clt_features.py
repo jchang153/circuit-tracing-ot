@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -71,11 +71,31 @@ def _iter_feature_values_from_tensor(
 ) -> list[CLTFeatureValue]:
     if layer is None:
         raise ValueError("Tensor activation extraction requires a layer id.")
-    if tensor.ndim == 3:
-        vector = tensor[0, position]
+    if tensor.ndim == 4:
+        vector = tensor[0, int(layer), position]
+    elif tensor.ndim == 3:
+        if tensor.shape[0] == 1:
+            vector = tensor[0, position]
+        elif int(layer) < tensor.shape[0]:
+            vector = tensor[int(layer), position]
+        else:
+            raise ValueError(
+                "Cannot extract layer-specific CLT activations from tensor shape "
+                f"{tuple(tensor.shape)} for layer={int(layer)}."
+            )
     elif tensor.ndim == 2:
+        if int(layer) != 0:
+            raise ValueError(
+                "Cannot extract nonzero layer-specific CLT activations from tensor shape "
+                f"{tuple(tensor.shape)}."
+            )
         vector = tensor[position]
     elif tensor.ndim == 1:
+        if int(layer) != 0:
+            raise ValueError(
+                "Cannot extract nonzero layer-specific CLT activations from tensor shape "
+                f"{tuple(tensor.shape)}."
+            )
         vector = tensor
     else:
         raise ValueError(f"Unsupported activation tensor shape: {tuple(tensor.shape)}")
@@ -101,6 +121,79 @@ def _iter_feature_values_from_tensor(
     ]
 
 
+def _is_layer_key(key: Any) -> bool:
+    if isinstance(key, int):
+        return True
+    if isinstance(key, str) and key.isdigit():
+        return True
+    return False
+
+
+def _iter_feature_values_from_layer_mapping(
+    data: Mapping[Any, Any],
+    *,
+    layer: int | None,
+    position: int,
+    top_k: int | None,
+) -> list[CLTFeatureValue] | None:
+    if not data or not all(_is_layer_key(key) for key in data):
+        return None
+    if layer is not None:
+        layer_payload = data.get(int(layer), data.get(str(int(layer))))
+        if layer_payload is None:
+            return []
+        return extract_clt_feature_values(
+            layer_payload,
+            layer=int(layer),
+            position=position,
+            top_k=top_k,
+        )
+    values: list[CLTFeatureValue] = []
+    for raw_layer, layer_payload in data.items():
+        values.extend(
+            extract_clt_feature_values(
+                layer_payload,
+                layer=int(raw_layer),
+                position=position,
+                top_k=top_k,
+            )
+        )
+    values.sort(key=lambda value: abs(value.value), reverse=True)
+    return values[:top_k] if top_k is not None else values
+
+
+def _iter_feature_values_from_sequence(
+    data: Sequence[Any],
+    *,
+    layer: int | None,
+    position: int,
+    top_k: int | None,
+) -> list[CLTFeatureValue]:
+    if isinstance(data, (str, bytes, bytearray)):
+        raise TypeError("String-like payloads cannot be interpreted as CLT activations.")
+    if layer is not None:
+        if int(layer) >= len(data):
+            return []
+        return extract_clt_feature_values(
+            data[int(layer)],
+            layer=int(layer),
+            position=position,
+            top_k=top_k,
+        )
+    values: list[CLTFeatureValue] = []
+    for raw_layer, layer_payload in enumerate(data):
+        values.extend(
+            extract_clt_feature_values(
+                layer_payload,
+                layer=raw_layer,
+                position=position,
+                top_k=top_k,
+            )
+        )
+    values.sort(key=lambda value: abs(value.value), reverse=True)
+    return values[:top_k] if top_k is not None else values
+
+
 def extract_clt_feature_values(
     activation_payload: Any,
     *,
@@ -115,6 +208,14 @@ def extract_clt_feature_values(
     expose per-layer tensors through a cache-like object.
     """
     if isinstance(activation_payload, Mapping):
+        layer_mapping_values = _iter_feature_values_from_layer_mapping(
+            activation_payload,
+            layer=layer,
+            position=position,
+            top_k=top_k,
+        )
+        if layer_mapping_values is not None:
+            return layer_mapping_values
         values = _iter_feature_values_from_mapping(activation_payload)
         if values:
             filtered = [value for value in values if value.position == position]
@@ -132,6 +233,16 @@ def extract_clt_feature_values(
                 )
     if isinstance(activation_payload, torch.Tensor):
         return _iter_feature_values_from_tensor(
+            activation_payload,
+            layer=layer,
+            position=position,
+            top_k=top_k,
+        )
+    if isinstance(activation_payload, Sequence) and not isinstance(
+        activation_payload,
+        (str, bytes, bytearray),
+    ):
+        return _iter_feature_values_from_sequence(
             activation_payload,
             layer=layer,
             position=position,

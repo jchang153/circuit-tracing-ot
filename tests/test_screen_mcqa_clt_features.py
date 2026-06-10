@@ -2,11 +2,15 @@ from collections import defaultdict
 import sys
 from pathlib import Path
 
+import pytest
+import torch
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from circuit_tracing_ot.clt_features import extract_clt_feature_values
 from scripts.screen_mcqa_clt_features import (
     accumulate_sparse_abs_deltas,
     family_accuracy_summary,
@@ -63,3 +67,22 @@ def test_family_accuracy_summary():
 
     assert summary["exact_acc"] == 0.5
     assert summary["family_exact_accs"] == {"answerPosition": 0.5, "randomLetter": 0.5}
+
+
+def test_extract_clt_feature_values_reads_layer_axis_in_3d_tensor():
+    tensor = torch.zeros(3, 2, 5)
+    tensor[0, 1, 0] = 10.0
+    tensor[2, 1, 4] = 9.0
+
+    values = extract_clt_feature_values(tensor, layer=2, position=1, top_k=1)
+
+    assert values[0].layer == 2
+    assert values[0].feature_idx == 4
+    assert values[0].value == 9.0
+
+
+def test_extract_clt_feature_values_rejects_nonzero_layer_from_2d_tensor():
+    tensor = torch.zeros(2, 5)
+
+    with pytest.raises(ValueError, match="nonzero layer-specific"):
+        extract_clt_feature_values(tensor, layer=2, position=1, top_k=1)
