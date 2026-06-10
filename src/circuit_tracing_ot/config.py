@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 MODEL_NAME = "google/gemma-2-2b"
+GEMMA_2_2B_PLT_TRANSCODER_SET = "mntss/gemma-scope-transcoders"
 SMALL_CLT_TRANSCODER_SET = "mntss/clt-gemma-2-2b-426k"
 LARGE_CLT_TRANSCODER_SET = "mntss/clt-gemma-2-2b-2.5M"
 

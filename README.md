@@ -228,6 +228,36 @@ the same signature/transport/calibration/test logic, and reports the selected fe
 For Stage A-only analysis, inspect `stage_a.layer_rankings_by_var`: it ranks the best calibrated
 CLT layer sites separately for `answer_pointer` and `answer_token`.
 
+## MCQA PLOT over Gemma-2-2B PLT Features
+
+The PLT runner uses GemmaScope per-layer transcoders from:
+
+```text
+mntss/gemma-scope-transcoders
+```
+
+Because PLTs decode only into their own MLP layer, the runner pins candidate sites to same-layer
+writes.
+
+```bash
+PYTHONPATH=src python scripts/plot_mcqa_plt.py \
+  --dataset-path jchang153/copycolors_mcqa \
+  --dataset-size 2000 \
+  --split-seed 0 \
+  --train-pool-size 100 \
+  --calibration-pool-size 100 \
+  --test-pool-size 100 \
+  --layers 0-25 \
+  --token-position-id last_token \
+  --stage-a-transport-methods uot \
+  --ot-epsilons 1.0,2.0 \
+  --uot-beta-neurals 0.3,1.0 \
+  --stage-a-row-top-k 6 \
+  --top-layers 4 \
+  --skip-stage-b \
+  --results-timestamp stage_a_layers_plt_train100_small_sweep
+```
+
 ## MCQA PLOT over Pruned Last-Token Graph Features
 
 To test only CLT features that survive Anthropic attribution-graph pruning, run the pruned
