@@ -6,7 +6,6 @@
 # Then install this file:
 #   pip install -r requirements.txt
 
-git+https://github.com/safety-research/circuit-tracer.git
 torch
 transformers
 accelerate
@@ -15,3 +14,6 @@ huggingface-hub
 PyYAML
 pandas
 numpy
+tqdm
+safetensors
+git+https://github.com/safety-research/circuit-tracer.git
