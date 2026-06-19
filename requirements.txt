@@ -12,6 +12,6 @@ transformers
 accelerate
 datasets
 huggingface-hub
-pyyaml
+PyYAML
 pandas
 numpy

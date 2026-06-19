@@ -15,7 +15,7 @@ dependencies = [
     "accelerate",
     "datasets",
     "huggingface-hub",
-    "pyyaml",
+    "PyYAML",
     "pandas",
 ]
 
