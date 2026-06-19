@@ -6,7 +6,7 @@
 # Then install this file:
 #   pip install -r requirements.txt
 
-circuit-tracer>=0.1.0
+git+https://github.com/safety-research/circuit-tracer.git
 torch
 transformers
 accelerate

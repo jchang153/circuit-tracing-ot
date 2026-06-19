@@ -9,7 +9,7 @@ description = "MCQA attribution graph experiments with Gemma-2-2B CLTs and circu
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "circuit-tracer>=0.1.0",
+    "circuit-tracer @ git+https://github.com/safety-research/circuit-tracer.git",
     "torch",
     "transformers",
     "accelerate",
@@ -21,7 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 viz = [
-    "circuit-tracer[viz]>=0.1.0",
+    "circuit-tracer[viz] @ git+https://github.com/safety-research/circuit-tracer.git",
     "ipykernel",
     "ipywidgets",
 ]
