@@ -16,5 +16,5 @@ pandas
 numpy
 tqdm
 safetensors
-sympy
+sympy>=1.13.3
 git+https://github.com/safety-research/circuit-tracer.git
