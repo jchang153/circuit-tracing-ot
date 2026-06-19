@@ -116,7 +116,6 @@ def _iter_feature_values_from_tensor(
         for feature_idx, value in zip(
             feature_indices.tolist(),
             activation_values.tolist(),
-            strict=True,
         )
     ]
 

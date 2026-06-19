@@ -43,7 +43,7 @@ def top_token_predictions(model, logits: torch.Tensor, *, k: int = 5) -> list[di
             "probability": float(prob),
             "token_id": int(token_id),
         }
-        for prob, token_id in zip(probs.detach().cpu(), token_ids.detach().cpu(), strict=True)
+        for prob, token_id in zip(probs.detach().cpu(), token_ids.detach().cpu())
     ]
 
 

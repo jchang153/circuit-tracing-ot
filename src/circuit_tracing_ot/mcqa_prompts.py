@@ -59,7 +59,7 @@ def _prompt_from_row(
 ) -> MCQAPrompt:
     labels = [str(label) for label in row["choices"]["label"]]
     texts = [str(text) for text in row["choices"]["text"]]
-    choices = tuple(zip(labels, texts, strict=True))
+    choices = tuple(zip(labels, texts))
     if "answerKey" in row:
         expected_answer = f" {labels[int(row['answerKey'])]}"
     else:

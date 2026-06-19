@@ -359,10 +359,10 @@ def family_accuracy_summary(
         raise ValueError("predictions, labels, and families must have the same length")
     correct = [
         int(prediction) == int(label)
-        for prediction, label in zip(predictions, labels, strict=True)
+        for prediction, label in zip(predictions, labels)
     ]
     family_correct: dict[str, list[bool]] = defaultdict(list)
-    for is_correct, family in zip(correct, families, strict=True):
+    for is_correct, family in zip(correct, families):
         family_correct[str(family)].append(bool(is_correct))
     return {
         "exact_acc": float(sum(correct) / max(1, len(correct))),
@@ -389,7 +389,7 @@ def screen_features(
     family_counts = {family: 0 for family in COUNTERFACTUAL_FAMILIES}
     start = perf_counter()
     for row_index, (base_input, source_input, family) in enumerate(
-        zip(bank.base_inputs, bank.source_inputs, bank.counterfactual_family_names, strict=True)
+        zip(bank.base_inputs, bank.source_inputs, bank.counterfactual_family_names)
     ):
         if _should_log_progress(row_index, bank.size):
             log_progress(

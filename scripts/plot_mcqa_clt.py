@@ -387,7 +387,6 @@ def filter_correct_examples_with_hf_model(
             source_predictions,
             base_expected_variants,
             source_expected_variants,
-            strict=True,
         ):
             if (
                 int(base_predicted) in base_variants
