@@ -1,7 +1,7 @@
 dataset:
   dataset_path: jchang153/copycolors_mcqa
   dataset_config: null
-  dataset_size: 2000
+  dataset_size: 10000
   include_base_prompts: true
   include_counterfactual_prompts: true
   counterfactual_families:
@@ -46,7 +46,6 @@ features:
 probe:
   modes:
     - per_layer
-    - all_layers
   probe_type: linear_softmax
   optimizer: adamw
   learning_rate: 1.0e-3
@@ -69,6 +68,7 @@ probe:
 
 stability:
   num_bootstraps: 20
+  bootstrap_scope: best_regularization_per_probe
   bootstrap_train_fraction: 0.8
   selected_feature_top_q: 256
   stable_frequency_threshold: 0.5
@@ -80,23 +80,24 @@ causal_validation:
   calibration_pool_size: 100
   test_pool_size: 100
   intervention_mode: decoded_mlp
+  write_layer_mode: same
   intervention_strengths:
-    - 0.25
+    - 0.1
+    - 0.2
     - 0.5
     - 1.0
     - 2.0
+    - 4.0
   feature_set_sizes:
+    - 1
+    - 2
+    - 4
     - 8
     - 16
     - 32
     - 64
     - 128
     - 256
-  baselines:
-    - no_intervention
-    - random_same_size
-    - activation_delta_screen
-    - full_layer_swap
 
 outputs:
   results_root: results
