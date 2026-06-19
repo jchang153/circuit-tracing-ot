@@ -256,6 +256,23 @@ def last_token_positions(records: list[PromptRecord], tokenizer) -> list[int]:
     return positions
 
 
+def drop_cached_activation(
+    *,
+    cache: CLTActivationCache,
+    prompt: str,
+    layer: int,
+    position: int,
+    top_k: int | None,
+) -> None:
+    """Drop per-prompt CLT caches after extraction to avoid GPU memory growth."""
+    payload_cache = getattr(cache, "_payload_by_prompt", None)
+    if isinstance(payload_cache, dict):
+        payload_cache.pop(prompt, None)
+    values_cache = getattr(cache, "_values_by_key", None)
+    if isinstance(values_cache, dict):
+        values_cache.pop((prompt, int(layer), int(position), None if top_k is None else int(top_k)), None)
+
+
 def screen_layer_features(
     *,
     records: list[PromptRecord],
@@ -280,6 +297,15 @@ def screen_layer_features(
             top_k=int(activation_top_k),
         )
         counts.update(int(value.feature_idx) for value in values)
+        drop_cached_activation(
+            cache=cache,
+            prompt=record.prompt,
+            layer=int(layer),
+            position=int(positions[row_index]),
+            top_k=int(activation_top_k),
+        )
+        if torch.cuda.is_available() and (row_index + 1) % 100 == 0:
+            torch.cuda.empty_cache()
     ranked = sorted(counts.items(), key=lambda item: (-int(item[1]), int(item[0])))
     return [int(feature_idx) for feature_idx, _count in ranked[: int(feature_cap)]]
 
@@ -314,6 +340,15 @@ def collect_layer_rows(
             if col is not None:
                 row[int(col)] = float(value.value)
         rows.append(row)
+        drop_cached_activation(
+            cache=cache,
+            prompt=record.prompt,
+            layer=int(layer),
+            position=int(positions[row_index]),
+            top_k=int(activation_top_k),
+        )
+        if torch.cuda.is_available() and (row_index + 1) % 100 == 0:
+            torch.cuda.empty_cache()
     return rows
 
 
@@ -943,7 +978,8 @@ def run_target(
 ) -> dict[str, object]:
     labels = target_labels(records, target_var)
     layer_results = []
-    full_layer_payloads = {}
+    selected_layer_summary = None
+    selected_payload = None
     for layer in layers:
         log_progress(f"target={target_var} layer={layer} probe grid start")
         layer_payload = layer_probe_grid(
@@ -965,22 +1001,44 @@ def run_target(
                 "screened_feature_count": len(layer_payload["feature_ids"]),
             }
         )
-        full_layer_payloads[int(layer)] = layer_payload
         write_json(
             output_dir / f"{target_var}_layer_{int(layer)}_summary.json",
             layer_results[-1],
         )
-    selected_layer_summary = max(
-        layer_results,
-        key=lambda item: (
-            float(item["best_record"]["validation_macro_accuracy"]),
-            float(item["best_record"]["validation_accuracy"]),
-            -float(item["best_record"]["validation_loss"]),
-            -int(item["layer"]),
-        ),
-    )
+        candidate_key = (
+            float(layer_results[-1]["best_record"]["validation_macro_accuracy"]),
+            float(layer_results[-1]["best_record"]["validation_accuracy"]),
+            -float(layer_results[-1]["best_record"]["validation_loss"]),
+            -int(layer_results[-1]["layer"]),
+        )
+        best_key = (
+            -1.0,
+            -1.0,
+            -math.inf,
+            -10**9,
+        )
+        if selected_layer_summary is not None:
+            best_key = (
+                float(selected_layer_summary["best_record"]["validation_macro_accuracy"]),
+                float(selected_layer_summary["best_record"]["validation_accuracy"]),
+                -float(selected_layer_summary["best_record"]["validation_loss"]),
+                -int(selected_layer_summary["layer"]),
+            )
+        if selected_layer_summary is None or candidate_key > best_key:
+            selected_layer_summary = layer_results[-1]
+            selected_payload = layer_payload
+            log_progress(
+                "selected layer candidate updated "
+                f"target={target_var} layer={int(layer)} "
+                f"val_macro={float(selected_layer_summary['best_record']['validation_macro_accuracy']):.4f}"
+            )
+        else:
+            del layer_payload
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    if selected_layer_summary is None or selected_payload is None:
+        raise RuntimeError(f"No selected layer payload for target={target_var}")
     selected_layer = int(selected_layer_summary["layer"])
-    selected_payload = full_layer_payloads[selected_layer]
     selected_fit = selected_payload["best_fit"]
     bootstrap_records = run_bootstraps(
         rows=selected_payload["rows"],
