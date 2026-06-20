@@ -372,26 +372,20 @@ def standardization_stats(
     return mean, std
 
 
-def make_dense_batch(
+def make_dense_matrix(
     rows: list[dict[int, float]],
-    indices: list[int],
     num_features: int,
     *,
     mean: torch.Tensor | None,
     std: torch.Tensor | None,
-    device: torch.device,
 ) -> torch.Tensor:
+    matrix = torch.zeros((len(rows), num_features), dtype=torch.float32)
+    for row_index, row in enumerate(rows):
+        for col, value in row.items():
+            matrix[row_index, int(col)] = float(value)
     if mean is not None and std is not None:
-        batch = (-mean / std).repeat(len(indices), 1)
-        for row_offset, index in enumerate(indices):
-            for col, value in rows[index].items():
-                batch[row_offset, int(col)] = (float(value) - mean[int(col)]) / std[int(col)]
-    else:
-        batch = torch.zeros((len(indices), num_features), dtype=torch.float32)
-        for row_offset, index in enumerate(indices):
-            for col, value in rows[index].items():
-                batch[row_offset, int(col)] = float(value)
-    return batch.to(device)
+        matrix = (matrix - mean.view(1, -1)) / std.view(1, -1)
+    return matrix
 
 
 def macro_accuracy(predictions: torch.Tensor, labels: torch.Tensor, num_classes: int) -> float:
@@ -419,14 +413,11 @@ def evaluate_probe(
     *,
     weights: torch.Tensor,
     bias: torch.Tensor,
-    rows: list[dict[int, float]],
+    features: torch.Tensor,
     labels: torch.Tensor,
     indices: list[int],
-    num_features: int,
     num_classes: int,
     batch_size: int,
-    mean: torch.Tensor | None,
-    std: torch.Tensor | None,
     device: torch.device,
 ) -> dict[str, float]:
     weights = weights.to(device)
@@ -437,14 +428,8 @@ def evaluate_probe(
     with torch.inference_mode():
         for start in range(0, len(indices), int(batch_size)):
             batch_indices = indices[start : start + int(batch_size)]
-            x = make_dense_batch(
-                rows,
-                batch_indices,
-                num_features,
-                mean=mean,
-                std=std,
-                device=device,
-            )
+            index_tensor = torch.tensor(batch_indices, dtype=torch.long)
+            x = features.index_select(0, index_tensor).to(device)
             y = labels[torch.tensor(batch_indices, dtype=torch.long)].to(device)
             logits = x @ weights.T + bias
             total_loss += float(F.cross_entropy(logits, y, reduction="sum").item())
@@ -462,11 +447,10 @@ def evaluate_probe(
 
 def train_linear_probe(
     *,
-    rows: list[dict[int, float]],
+    features: torch.Tensor,
     labels: torch.Tensor,
     train_indices: list[int],
     validation_indices: list[int],
-    num_features: int,
     num_classes: int,
     l1_lambda: float,
     l2_lambda: float,
@@ -475,13 +459,12 @@ def train_linear_probe(
     epochs: int,
     early_stopping_patience: int,
     balanced_classes: bool,
-    mean: torch.Tensor | None,
-    std: torch.Tensor | None,
     seed: int,
     device: torch.device,
 ) -> ProbeFit:
     generator = torch.Generator()
     generator.manual_seed(int(seed))
+    num_features = int(features.shape[1])
     linear = torch.nn.Linear(num_features, num_classes)
     torch.nn.init.zeros_(linear.weight)
     torch.nn.init.zeros_(linear.bias)
@@ -502,14 +485,8 @@ def train_linear_probe(
         for start in range(0, len(order), int(batch_size)):
             batch_positions = order[start : start + int(batch_size)]
             batch_indices = [train_indices[position] for position in batch_positions]
-            x = make_dense_batch(
-                rows,
-                batch_indices,
-                num_features,
-                mean=mean,
-                std=std,
-                device=device,
-            )
+            index_tensor = torch.tensor(batch_indices, dtype=torch.long)
+            x = features.index_select(0, index_tensor).to(device)
             y = labels[torch.tensor(batch_indices, dtype=torch.long)].to(device)
             logits = linear(x)
             loss = F.cross_entropy(logits, y, weight=ce_weight)
@@ -524,14 +501,11 @@ def train_linear_probe(
         metrics = evaluate_probe(
             weights=linear.weight.detach().cpu(),
             bias=linear.bias.detach().cpu(),
-            rows=rows,
+            features=features,
             labels=labels,
             indices=validation_indices,
-            num_features=num_features,
             num_classes=num_classes,
             batch_size=batch_size,
-            mean=mean,
-            std=std,
             device=device,
         )
         if (
@@ -590,7 +564,7 @@ def feature_records_from_importance(
 
 def run_bootstraps(
     *,
-    rows: list[dict[int, float]],
+    features: torch.Tensor,
     labels: torch.Tensor,
     train_indices: list[int],
     validation_indices: list[int],
@@ -598,8 +572,6 @@ def run_bootstraps(
     num_classes: int,
     selected_fit: dict[str, object],
     config: dict[str, Any],
-    mean: torch.Tensor | None,
-    std: torch.Tensor | None,
     device: torch.device,
     seed: int,
 ) -> list[dict[str, object]]:
@@ -618,11 +590,10 @@ def run_bootstraps(
             f"{bootstrap_index + 1}/{num_bootstraps} sample_size={sample_size}"
         )
         fit = train_linear_probe(
-            rows=rows,
+            features=features,
             labels=labels,
             train_indices=bootstrap_train,
             validation_indices=validation_indices,
-            num_features=len(feature_ids),
             num_classes=num_classes,
             l1_lambda=float(selected_fit["l1_lambda"]),
             l2_lambda=float(selected_fit["l2_lambda"]),
@@ -631,8 +602,6 @@ def run_bootstraps(
             epochs=int(probe_config["epochs"]),
             early_stopping_patience=int(probe_config["early_stopping_patience"]),
             balanced_classes=str(probe_config.get("class_weighting", "balanced")) == "balanced",
-            mean=mean,
-            std=std,
             seed=int(seed) + bootstrap_index + 1,
             device=device,
         )
@@ -874,6 +843,16 @@ def layer_probe_grid(
             len(feature_ids),
             eps=float(feature_config.get("standardization_eps", 1.0e-6)),
         )
+    features = make_dense_matrix(
+        rows,
+        len(feature_ids),
+        mean=mean,
+        std=std,
+    )
+    log_progress(
+        "built dense probe matrix "
+        f"target={target_var} layer={layer} shape={tuple(features.shape)}"
+    )
     num_classes = num_classes_for_target(target_var)
     grid_records = []
     best = None
@@ -884,11 +863,10 @@ def layer_probe_grid(
                 f"target={target_var} layer={layer} l1={float(l1_lambda):g} l2={float(l2_lambda):g}"
             )
             fit = train_linear_probe(
-                rows=rows,
+                features=features,
                 labels=labels,
                 train_indices=splits.train,
                 validation_indices=splits.validation,
-                num_features=len(feature_ids),
                 num_classes=num_classes,
                 l1_lambda=float(l1_lambda),
                 l2_lambda=float(l2_lambda),
@@ -897,22 +875,17 @@ def layer_probe_grid(
                 epochs=int(probe_config["epochs"]),
                 early_stopping_patience=int(probe_config["early_stopping_patience"]),
                 balanced_classes=str(probe_config.get("class_weighting", "balanced")) == "balanced",
-                mean=mean,
-                std=std,
                 seed=int(config["dataset"]["split_seed"]) + int(layer) * 1009,
                 device=device,
             )
             test_metrics = evaluate_probe(
                 weights=fit.weights,
                 bias=fit.bias,
-                rows=rows,
+                features=features,
                 labels=labels,
                 indices=splits.test,
-                num_features=len(feature_ids),
                 num_classes=num_classes,
                 batch_size=int(probe_config["batch_size"]),
-                mean=mean,
-                std=std,
                 device=device,
             )
             record = {
@@ -950,7 +923,7 @@ def layer_probe_grid(
         "layer": int(layer),
         "target_var": target_var,
         "feature_ids": feature_ids,
-        "rows": rows,
+        "features": features,
         "mean": mean,
         "std": std,
         "grid_records": grid_records,
@@ -1041,7 +1014,7 @@ def run_target(
     selected_layer = int(selected_layer_summary["layer"])
     selected_fit = selected_payload["best_fit"]
     bootstrap_records = run_bootstraps(
-        rows=selected_payload["rows"],
+        features=selected_payload["features"],
         labels=labels,
         train_indices=splits.train,
         validation_indices=splits.validation,
@@ -1049,8 +1022,6 @@ def run_target(
         num_classes=num_classes_for_target(target_var),
         selected_fit=selected_payload["best_record"],
         config=config,
-        mean=selected_payload["mean"],
-        std=selected_payload["std"],
         device=device,
         seed=int(config["dataset"]["split_seed"]) + selected_layer * 9973,
     )
@@ -1190,6 +1161,7 @@ def main() -> None:
     positions = last_token_positions(records, model.tokenizer)
     cache = CLTActivationCache(model)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    log_progress(f"probe training device={device}")
     layers = parse_csv_ints(str(config["features"]["layers"])) or tuple(range(26))
     targets = tuple(canonicalize_target_var(target) for target in config["labels"]["targets"])
 
