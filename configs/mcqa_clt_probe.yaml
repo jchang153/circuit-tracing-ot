@@ -1,7 +1,7 @@
 dataset:
   dataset_path: jchang153/copycolors_mcqa
   dataset_config: null
-  dataset_size: 10000
+  dataset_size: 2000
   include_base_prompts: true
   include_counterfactual_prompts: true
   counterfactual_families:
