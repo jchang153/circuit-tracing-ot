@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 import yaml
 
+from circuit_tracing_ot.clt_features import extract_clt_feature_values
 from circuit_tracing_ot.config import MODEL_NAME, resolve_transcoder_set
 from circuit_tracing_ot.logging import log_progress
 from circuit_tracing_ot.mcqa_plot.clt_backend import CLTActivationCache, CLTSite
@@ -273,6 +274,41 @@ def drop_cached_activation(
         values_cache.pop((prompt, int(layer), int(position), None if top_k is None else int(top_k)), None)
 
 
+def drop_prompt_activation_payload(*, cache: CLTActivationCache, prompt: str) -> None:
+    """Drop all per-prompt CLT caches after extracting shared layer values."""
+    payload_cache = getattr(cache, "_payload_by_prompt", None)
+    if isinstance(payload_cache, dict):
+        payload_cache.pop(prompt, None)
+    values_cache = getattr(cache, "_values_by_key", None)
+    if isinstance(values_cache, dict):
+        keys_to_drop = [key for key in values_cache if key and key[0] == prompt]
+        for key in keys_to_drop:
+            values_cache.pop(key, None)
+
+
+def extract_prompt_layers(
+    *,
+    cache: CLTActivationCache,
+    prompt: str,
+    position: int,
+    layers: tuple[int, ...],
+    top_k: int,
+) -> dict[int, list[Any]]:
+    payload = cache.payload(prompt)
+    try:
+        return {
+            int(layer): extract_clt_feature_values(
+                payload,
+                layer=int(layer),
+                position=int(position),
+                top_k=int(top_k),
+            )
+            for layer in layers
+        }
+    finally:
+        drop_prompt_activation_payload(cache=cache, prompt=prompt)
+
+
 def screen_layer_features(
     *,
     records: list[PromptRecord],
@@ -308,6 +344,44 @@ def screen_layer_features(
             torch.cuda.empty_cache()
     ranked = sorted(counts.items(), key=lambda item: (-int(item[1]), int(item[0])))
     return [int(feature_idx) for feature_idx, _count in ranked[: int(feature_cap)]]
+
+
+def screen_all_layer_features(
+    *,
+    records: list[PromptRecord],
+    positions: list[int],
+    layers: tuple[int, ...],
+    activation_top_k: int,
+    feature_cap: int,
+    cache: CLTActivationCache,
+) -> dict[int, list[int]]:
+    counts_by_layer: dict[int, Counter[int]] = {int(layer): Counter() for layer in layers}
+    start = perf_counter()
+    for row_index, record in enumerate(records):
+        if row_index == 0 or row_index == len(records) - 1 or (row_index + 1) % 100 == 0:
+            log_progress(
+                "screening CLT features for all layers "
+                f"layers={layers[0]}-{layers[-1]} row={row_index + 1}/{len(records)} "
+                f"elapsed={perf_counter() - start:.1f}s"
+            )
+        values_by_layer = extract_prompt_layers(
+            cache=cache,
+            prompt=record.prompt,
+            position=int(positions[row_index]),
+            layers=layers,
+            top_k=int(activation_top_k),
+        )
+        for layer, values in values_by_layer.items():
+            counts_by_layer[int(layer)].update(int(value.feature_idx) for value in values)
+        if torch.cuda.is_available() and (row_index + 1) % 100 == 0:
+            torch.cuda.empty_cache()
+    feature_ids_by_layer: dict[int, list[int]] = {}
+    for layer, counts in counts_by_layer.items():
+        ranked = sorted(counts.items(), key=lambda item: (-int(item[1]), int(item[0])))
+        feature_ids_by_layer[int(layer)] = [
+            int(feature_idx) for feature_idx, _count in ranked[: int(feature_cap)]
+        ]
+    return feature_ids_by_layer
 
 
 def collect_layer_rows(
@@ -350,6 +424,95 @@ def collect_layer_rows(
         if torch.cuda.is_available() and (row_index + 1) % 100 == 0:
             torch.cuda.empty_cache()
     return rows
+
+
+def build_all_layer_feature_payloads(
+    *,
+    records: list[PromptRecord],
+    positions: list[int],
+    layers: tuple[int, ...],
+    splits: SplitIndices,
+    cache: CLTActivationCache,
+    config: dict[str, Any],
+) -> dict[int, dict[str, object]]:
+    feature_config = config["features"]
+    activation_top_k = int(feature_config["activation_top_k"])
+    feature_ids_by_layer = screen_all_layer_features(
+        records=records,
+        positions=positions,
+        layers=layers,
+        activation_top_k=activation_top_k,
+        feature_cap=int(feature_config["feature_cap_per_layer"]),
+        cache=cache,
+    )
+    for layer in layers:
+        if not feature_ids_by_layer[int(layer)]:
+            raise RuntimeError(f"No screened features for layer {layer}")
+
+    feature_to_col_by_layer = {
+        int(layer): {
+            int(feature_idx): int(col)
+            for col, feature_idx in enumerate(feature_ids_by_layer[int(layer)])
+        }
+        for layer in layers
+    }
+    matrices_by_layer = {
+        int(layer): torch.zeros(
+            (len(records), len(feature_ids_by_layer[int(layer)])),
+            dtype=torch.float32,
+        )
+        for layer in layers
+    }
+    start = perf_counter()
+    for row_index, record in enumerate(records):
+        if row_index == 0 or row_index == len(records) - 1 or (row_index + 1) % 100 == 0:
+            log_progress(
+                "collecting all layer matrices "
+                f"layers={layers[0]}-{layers[-1]} row={row_index + 1}/{len(records)} "
+                f"elapsed={perf_counter() - start:.1f}s"
+            )
+        values_by_layer = extract_prompt_layers(
+            cache=cache,
+            prompt=record.prompt,
+            position=int(positions[row_index]),
+            layers=layers,
+            top_k=activation_top_k,
+        )
+        for layer, values in values_by_layer.items():
+            feature_to_col = feature_to_col_by_layer[int(layer)]
+            matrix = matrices_by_layer[int(layer)]
+            for value in values:
+                col = feature_to_col.get(int(value.feature_idx))
+                if col is not None:
+                    matrix[row_index, int(col)] = float(value.value)
+        if torch.cuda.is_available() and (row_index + 1) % 100 == 0:
+            torch.cuda.empty_cache()
+
+    payloads: dict[int, dict[str, object]] = {}
+    train_index_tensor = torch.tensor(splits.train, dtype=torch.long)
+    standardize = bool(feature_config.get("standardize_features", True))
+    eps = float(feature_config.get("standardization_eps", 1.0e-6))
+    for layer in layers:
+        matrix = matrices_by_layer[int(layer)]
+        mean = std = None
+        if standardize:
+            train_matrix = matrix.index_select(0, train_index_tensor)
+            mean = train_matrix.mean(dim=0)
+            variance = torch.clamp(train_matrix.square().mean(dim=0) - mean.square(), min=0.0)
+            std = torch.sqrt(variance + eps)
+            matrix.sub_(mean.view(1, -1)).div_(std.view(1, -1))
+        log_progress(
+            "built cached dense probe matrix "
+            f"layer={int(layer)} shape={tuple(matrix.shape)}"
+        )
+        payloads[int(layer)] = {
+            "layer": int(layer),
+            "feature_ids": feature_ids_by_layer[int(layer)],
+            "features": matrix,
+            "mean": mean,
+            "std": std,
+        }
+    return payloads
 
 
 def standardization_stats(
@@ -1114,16 +1277,16 @@ def run_targets_shared_layers(
         }
         for target_var in targets
     }
+    layer_feature_payloads = build_all_layer_feature_payloads(
+        records=records,
+        positions=positions,
+        layers=layers,
+        splits=splits,
+        cache=cache,
+        config=config,
+    )
     for layer in layers:
-        log_progress(f"shared layer feature extraction start layer={int(layer)}")
-        layer_feature_payload = build_layer_feature_payload(
-            records=records,
-            positions=positions,
-            layer=int(layer),
-            splits=splits,
-            cache=cache,
-            config=config,
-        )
+        layer_feature_payload = layer_feature_payloads[int(layer)]
         for target_var in targets:
             layer_payload = layer_probe_grid(
                 target_var=target_var,
