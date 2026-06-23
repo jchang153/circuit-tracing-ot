@@ -1,0 +1,98 @@
+dataset:
+  dataset_path: jchang153/copycolors_mcqa
+  dataset_config: null
+  dataset_size: 2000
+  include_base_prompts: true
+  include_counterfactual_prompts: true
+  counterfactual_families:
+    - answerPosition
+    - randomLetter
+    - answerPosition_randomLetter
+  deduplicate_prompts: true
+  filter_model_correct: true
+  filter_batch_size: 32
+  split_seed: 0
+  train_fraction: 0.7
+  validation_fraction: 0.15
+  test_fraction: 0.15
+  split_by_original_row: true
+
+model:
+  model_name: google/gemma-2-2b
+  transcoder_size: 426k
+  transcoder_set: null
+  dtype: bf16
+  offload: null
+  backend: null
+
+labels:
+  targets:
+    - answer_pointer
+    - answer_token
+  pointer_num_classes: 4
+  token_num_classes: 26
+  token_label_space: alphabet
+
+features:
+  token_position_id: last_token
+  layers: 17-25
+  activation_top_k: 2048
+  top_k_rank_by: abs_activation
+  feature_cap_per_layer: 8192
+  feature_cap_metric: activation_frequency
+  standardize_features: true
+  standardization_eps: 1.0e-6
+
+probe:
+  modes:
+    - per_layer
+  probe_type: linear_softmax
+  optimizer: adamw
+  learning_rate: 1.0e-3
+  batch_size: 256
+  epochs: 200
+  early_stopping_patience: 20
+  class_weighting: balanced
+  l2_lambdas:
+    - 1.0e-5
+    - 1.0e-4
+    - 1.0e-3
+    - 1.0e-2
+  l1_lambdas:
+    - 0.0
+    - 1.0e-6
+    - 1.0e-5
+    - 1.0e-4
+    - 1.0e-3
+  selection_metric: validation_macro_accuracy
+
+stability:
+  num_bootstraps: 20
+  bootstrap_scope: best_regularization_per_probe
+  bootstrap_train_fraction: 0.8
+  selected_feature_top_q: 256
+  stable_frequency_threshold: 0.5
+  max_report_features: 256
+
+causal_validation:
+  enabled: true
+  validation_pair_source: mcqa_pair_banks
+  calibration_pool_size: 100
+  test_pool_size: 100
+  intervention_mode: decoded_mlp
+  write_layer_mode: same
+  intervention_strengths:
+    - 1.0
+  feature_set_sizes:
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+
+outputs:
+  results_root: results
+  results_timestamp: mcqa_clt_426k_probe_2k_layers17_25
+  save_activation_cache: true
+  save_probe_weights: true
+  save_prediction_details: false

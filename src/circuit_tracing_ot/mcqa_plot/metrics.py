@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from .checking import checker_accuracy
 from .data import (
     ALPHABET_LABELS,
     COUNTERFACTUAL_FAMILIES,
@@ -183,6 +184,7 @@ def _family_exact_accs(
 
 
 def metrics_from_logits(logits: torch.Tensor, bank: MCQAPairBank, tokenizer=None) -> dict[str, object]:
+    """Compute exact accuracy, family-wise accuracy, and optional decoded answer accuracy."""
     target_logits = gather_variable_logits(logits, bank)
     predictions = target_logits.argmax(dim=-1)
     labels = bank.labels.to(predictions.device)
@@ -218,6 +220,7 @@ def metrics_from_logits(logits: torch.Tensor, bank: MCQAPairBank, tokenizer=None
             for expected, decoded in zip(decoded_targets, decoded_predictions)
         ) / max(1, len(decoded_predictions))
         metrics["decoded_answer_acc"] = float(decoded_acc)
+        metrics["checker_acc"] = float(checker_accuracy(decoded_predictions, bank.expected_answer_texts))
     return metrics
 
 
