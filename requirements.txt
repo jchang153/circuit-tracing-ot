@@ -8,6 +8,7 @@
 
 torch
 transformers
+transformer_lens
 accelerate
 datasets
 huggingface-hub

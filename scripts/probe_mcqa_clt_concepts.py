@@ -114,6 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-size", type=int)
     parser.add_argument("--layers")
     parser.add_argument("--targets")
+    parser.add_argument("--transcoder-set")
+    parser.add_argument("--transcoder-size")
     parser.add_argument("--activation-top-k", type=int)
     parser.add_argument("--feature-cap-per-layer", type=int)
     parser.add_argument("--num-bootstraps", type=int)
@@ -130,6 +132,10 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dic
         updates.setdefault("features", {})["layers"] = str(args.layers)
     if args.targets is not None:
         updates.setdefault("labels", {})["targets"] = list(parse_csv_strings(args.targets) or ())
+    if args.transcoder_set is not None:
+        updates.setdefault("model", {})["transcoder_set"] = str(args.transcoder_set)
+    if args.transcoder_size is not None:
+        updates.setdefault("model", {})["transcoder_size"] = str(args.transcoder_size)
     if args.activation_top_k is not None:
         updates.setdefault("features", {})["activation_top_k"] = int(args.activation_top_k)
     if args.feature_cap_per_layer is not None:

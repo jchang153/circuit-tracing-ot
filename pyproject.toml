@@ -12,6 +12,7 @@ dependencies = [
     "circuit-tracer @ git+https://github.com/safety-research/circuit-tracer.git",
     "torch",
     "transformers",
+    "transformer_lens",
     "accelerate",
     "datasets",
     "huggingface-hub",
