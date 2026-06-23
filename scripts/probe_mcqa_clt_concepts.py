@@ -803,20 +803,16 @@ def run_causal_validation(
     }
 
 
-def layer_probe_grid(
+def build_layer_feature_payload(
     *,
     records: list[PromptRecord],
     positions: list[int],
-    target_var: str,
     layer: int,
-    labels: torch.Tensor,
     splits: SplitIndices,
     cache: CLTActivationCache,
     config: dict[str, Any],
-    device: torch.device,
 ) -> dict[str, object]:
     feature_config = config["features"]
-    probe_config = config["probe"]
     feature_ids = screen_layer_features(
         records=records,
         positions=positions,
@@ -851,9 +847,35 @@ def layer_probe_grid(
     )
     log_progress(
         "built dense probe matrix "
-        f"target={target_var} layer={layer} shape={tuple(features.shape)}"
+        f"layer={layer} shape={tuple(features.shape)}"
     )
+    return {
+        "layer": int(layer),
+        "feature_ids": feature_ids,
+        "features": features,
+        "mean": mean,
+        "std": std,
+    }
+
+
+def layer_probe_grid(
+    *,
+    target_var: str,
+    labels: torch.Tensor,
+    splits: SplitIndices,
+    layer_payload: dict[str, object],
+    config: dict[str, Any],
+    device: torch.device,
+) -> dict[str, object]:
+    probe_config = config["probe"]
+    layer = int(layer_payload["layer"])
+    feature_ids = layer_payload["feature_ids"]
+    features = layer_payload["features"]
     num_classes = num_classes_for_target(target_var)
+    log_progress(
+        "target probe grid start "
+        f"target={target_var} layer={layer} features={len(feature_ids)}"
+    )
     grid_records = []
     best = None
     for l1_lambda in probe_config["l1_lambdas"]:
@@ -924,8 +946,6 @@ def layer_probe_grid(
         "target_var": target_var,
         "feature_ids": feature_ids,
         "features": features,
-        "mean": mean,
-        "std": std,
         "grid_records": grid_records,
         "best_record": best["record"],
         "best_fit": best["fit"],
@@ -1070,6 +1090,152 @@ def run_target(
     }
 
 
+def run_targets_shared_layers(
+    *,
+    records: list[PromptRecord],
+    positions: list[int],
+    targets: tuple[str, ...],
+    splits: SplitIndices,
+    layers: tuple[int, ...],
+    model,
+    tokenizer,
+    datasets_by_name: dict[str, list[dict[str, object]]],
+    cache: CLTActivationCache,
+    config: dict[str, Any],
+    device: torch.device,
+    output_dir: Path,
+) -> dict[str, object]:
+    labels_by_target = {target_var: target_labels(records, target_var) for target_var in targets}
+    states: dict[str, dict[str, object]] = {
+        target_var: {
+            "layer_results": [],
+            "selected_layer_summary": None,
+            "selected_payload": None,
+        }
+        for target_var in targets
+    }
+    for layer in layers:
+        log_progress(f"shared layer feature extraction start layer={int(layer)}")
+        layer_feature_payload = build_layer_feature_payload(
+            records=records,
+            positions=positions,
+            layer=int(layer),
+            splits=splits,
+            cache=cache,
+            config=config,
+        )
+        for target_var in targets:
+            layer_payload = layer_probe_grid(
+                target_var=target_var,
+                labels=labels_by_target[target_var],
+                splits=splits,
+                layer_payload=layer_feature_payload,
+                config=config,
+                device=device,
+            )
+            layer_summary = {
+                "layer": int(layer),
+                "best_record": layer_payload["best_record"],
+                "top_features_by_main_probe": layer_payload["top_features_by_main_probe"],
+                "screened_feature_count": len(layer_payload["feature_ids"]),
+            }
+            states[target_var]["layer_results"].append(layer_summary)
+            write_json(output_dir / f"{target_var}_layer_{int(layer)}_summary.json", layer_summary)
+            candidate_key = (
+                float(layer_summary["best_record"]["validation_macro_accuracy"]),
+                float(layer_summary["best_record"]["validation_accuracy"]),
+                -float(layer_summary["best_record"]["validation_loss"]),
+                -int(layer_summary["layer"]),
+            )
+            selected_layer_summary = states[target_var]["selected_layer_summary"]
+            best_key = (-1.0, -1.0, -math.inf, -10**9)
+            if selected_layer_summary is not None:
+                best_key = (
+                    float(selected_layer_summary["best_record"]["validation_macro_accuracy"]),
+                    float(selected_layer_summary["best_record"]["validation_accuracy"]),
+                    -float(selected_layer_summary["best_record"]["validation_loss"]),
+                    -int(selected_layer_summary["layer"]),
+                )
+            if selected_layer_summary is None or candidate_key > best_key:
+                states[target_var]["selected_layer_summary"] = layer_summary
+                states[target_var]["selected_payload"] = layer_payload
+                log_progress(
+                    "selected layer candidate updated "
+                    f"target={target_var} layer={int(layer)} "
+                    f"val_macro={float(layer_summary['best_record']['validation_macro_accuracy']):.4f}"
+                )
+            else:
+                del layer_payload
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    target_payloads: dict[str, object] = {}
+    for target_var in targets:
+        selected_layer_summary = states[target_var]["selected_layer_summary"]
+        selected_payload = states[target_var]["selected_payload"]
+        if selected_layer_summary is None or selected_payload is None:
+            raise RuntimeError(f"No selected layer payload for target={target_var}")
+        selected_layer = int(selected_layer_summary["layer"])
+        selected_fit = selected_payload["best_fit"]
+        bootstrap_records = run_bootstraps(
+            features=selected_payload["features"],
+            labels=labels_by_target[target_var],
+            train_indices=splits.train,
+            validation_indices=splits.validation,
+            feature_ids=selected_payload["feature_ids"],
+            num_classes=num_classes_for_target(target_var),
+            selected_fit=selected_payload["best_record"],
+            config=config,
+            device=device,
+            seed=int(config["dataset"]["split_seed"]) + selected_layer * 9973,
+        )
+        feature_ranking = aggregate_bootstrap_ranking(
+            bootstrap_records=bootstrap_records,
+            feature_ids=selected_payload["feature_ids"],
+            main_importance=selected_payload["main_importance"],
+        )
+        causal_validation = run_causal_validation(
+            model=model,
+            tokenizer=tokenizer,
+            datasets_by_name=datasets_by_name,
+            target_var=target_var,
+            selected_layer=selected_layer,
+            feature_ranking=feature_ranking,
+            config=config,
+            cache=cache,
+        )
+        if bool(config["outputs"].get("save_probe_weights", True)):
+            torch.save(
+                {
+                    "target_var": target_var,
+                    "selected_layer": selected_layer,
+                    "feature_ids": selected_payload["feature_ids"],
+                    "weights": selected_fit.weights,
+                    "bias": selected_fit.bias,
+                    "best_record": selected_payload["best_record"],
+                },
+                output_dir / f"{target_var}_selected_probe.pt",
+            )
+        target_payloads[target_var] = {
+            "target_var": target_var,
+            "layer_results": states[target_var]["layer_results"],
+            "selected_layer": selected_layer,
+            "selected_probe": selected_payload["best_record"],
+            "bootstrap_records": [
+                {
+                    key: value
+                    for key, value in record.items()
+                    if key not in {"importance", "selected_columns"}
+                }
+                for record in bootstrap_records
+            ],
+            "feature_ranking": feature_ranking[: int(config["stability"]["max_report_features"])],
+            "causal_validation": causal_validation,
+        }
+        write_json(output_dir / f"{target_var}_results.json", target_payloads[target_var])
+    return target_payloads
+
+
 def main() -> None:
     start = perf_counter()
     args = build_parser().parse_args()
@@ -1165,23 +1331,20 @@ def main() -> None:
     layers = parse_csv_ints(str(config["features"]["layers"])) or tuple(range(26))
     targets = tuple(canonicalize_target_var(target) for target in config["labels"]["targets"])
 
-    target_payloads = {}
-    for target_var in targets:
-        target_payloads[target_var] = run_target(
-            records=records,
-            positions=positions,
-            target_var=target_var,
-            splits=splits,
-            layers=layers,
-            model=model,
-            tokenizer=model.tokenizer,
-            datasets_by_name=datasets_by_name,
-            cache=cache,
-            config=config,
-            device=device,
-            output_dir=output_dir,
-        )
-        write_json(output_dir / f"{target_var}_results.json", target_payloads[target_var])
+    target_payloads = run_targets_shared_layers(
+        records=records,
+        positions=positions,
+        targets=targets,
+        splits=splits,
+        layers=layers,
+        model=model,
+        tokenizer=model.tokenizer,
+        datasets_by_name=datasets_by_name,
+        cache=cache,
+        config=config,
+        device=device,
+        output_dir=output_dir,
+    )
 
     final_payload = {
         "kind": "mcqa_clt_probe",
