@@ -82,22 +82,13 @@ causal_validation:
   intervention_mode: decoded_mlp
   write_layer_mode: same
   intervention_strengths:
-    - 0.1
-    - 0.2
-    - 0.5
     - 1.0
-    - 2.0
-    - 4.0
   feature_set_sizes:
     - 1
     - 2
+    - 3
     - 4
-    - 8
-    - 16
-    - 32
-    - 64
-    - 128
-    - 256
+    - 5
 
 outputs:
   results_root: results
